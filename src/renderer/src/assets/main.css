@@ -836,6 +836,108 @@ body {
   color: var(--mdf-muted);
 }
 
+/* 视图 → 侧边栏：关掉后整列让位给编辑区 */
+.outline.is-hidden {
+  display: none;
+}
+
+/* 文件页：文件名 + 首行预览，当前文件描边高亮 */
+.files-note {
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--mdf-muted);
+}
+
+.files-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.files-empty-text {
+  font-size: 12px;
+  color: var(--mdf-muted);
+}
+
+.files-open {
+  align-self: flex-start;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  background: var(--mdf-panel);
+  border: 1px solid var(--mdf-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.files-open:hover {
+  color: var(--mdf-accent);
+  border-color: var(--mdf-accent);
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.file-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 5px 8px;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.file-item:hover {
+  background: var(--mdf-bg);
+}
+
+.file-item.is-active {
+  background: var(--mdf-accent-soft);
+  border-color: var(--mdf-accent);
+}
+
+.file-name {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--mdf-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-item.is-active .file-name {
+  color: var(--mdf-accent);
+}
+
+.file-stem {
+  font-weight: 600;
+}
+
+.file-ext {
+  color: var(--mdf-muted);
+}
+
+.file-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--mdf-muted);
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .issues-head {
   display: flex;
   align-items: center;

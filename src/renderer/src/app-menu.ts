@@ -19,6 +19,7 @@ import type { MenuBarMenu } from './menubar'
 export interface AppMenuContext {
   newDoc(): void
   openDoc(): void
+  openFolder(): void
   save(): void
   saveAs(): void
   saveAll(): void
@@ -32,6 +33,9 @@ export interface AppMenuContext {
   editorFacts(): EditorFacts
   sourceMode(): boolean
   toggleSourceMode(): void
+  sidebar(): boolean
+  toggleSidebar(): void
+  inspect(): void
   zoom(): number
   zoomIn(): void
   zoomOut(): void
@@ -109,6 +113,7 @@ function fileMenu(ctx: AppMenuContext): MenuBarMenu {
       return [
         { label: '新建', hint: 'Ctrl+N', run: () => ctx.newDoc() },
         { label: '打开…', hint: 'Ctrl+O', run: () => ctx.openDoc() },
+        { label: '打开文件夹…', run: () => ctx.openFolder() },
         {
           label: '最近打开',
           children:
@@ -224,6 +229,8 @@ function viewMenu(ctx: AppMenuContext): MenuBarMenu {
           checked: ctx.sourceMode(),
           run: () => ctx.toggleSourceMode()
         },
+        { label: '侧边栏', checked: ctx.sidebar(), keepOpen: true, run: () => ctx.toggleSidebar() },
+        { label: '文档检查', run: () => ctx.inspect() },
         { divider: true, label: '' },
         {
           label: '实际大小',

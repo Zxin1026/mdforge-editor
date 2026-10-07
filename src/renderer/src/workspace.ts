@@ -19,7 +19,8 @@ import {
   type ExportOptions,
   type ExternalChange,
   type FileErrorInfo,
-  type FileSnapshot
+  type FileSnapshot,
+  type FolderEntry
 } from '../../shared/ipc'
 import type { EditorAction, EditorFacts } from './editor/actions'
 import type { LinkTarget } from './editor/links'
@@ -115,6 +116,12 @@ export class Workspace {
   private notifying = new Set<string>()
   /** 关窗确认进行中：主进程重复询问时不再叠第二个框 */
   private quitting = false
+  /** 文件列表面板：打开的文件夹与它的直接子级 md 列表 */
+  private folderRoot: string | null = null
+  private folderEntries: FolderEntry[] = []
+  private folderLoading = false
+  private folderError: string | null = null
+  private sidebarOn = true
 
   private readonly tabs_: TabBar
   private readonly side_: SidePanel
@@ -131,9 +138,12 @@ export class Workspace {
       onPickOutline: (pos) => this.active()?.editor.jumpTo(pos),
       onPickIssue: (issue) => this.pickIssue(issue),
       onRunCheck: () => void this.runCheck(),
+      onPickFile: (path) => void this.openPath(path),
+      onOpenFolder: () => void this.openFolderViaDialog(),
       onModeChange: (mode) => {
         if (mode === 'issues') void this.runCheck()
-        else this.updateOutline()
+        else if (mode === 'outline') this.updateOutline()
+        else this.pushFolderView()
       }
     })
     deps.metaEl.addEventListener('click', () => this.toggleMetaMenu())
@@ -359,6 +369,86 @@ export class Workspace {
       return
     }
     for (const path of result.value) await this.openPath(path)
+  }
+
+  // ---- 文件夹与侧边栏 ----
+
+  /** 文件 → 打开文件夹：选目录、记进会话，面板切到文件页直接看列表 */
+  async openFolderViaDialog(): Promise<void> {
+    const result = await window.mdforge.openFolder()
+    if (!result.ok) {
+      this.notify(result.error)
+      return
+    }
+    if (result.value === null) return
+    this.folderRoot = result.value
+    this.folderEntries = []
+    this.folderError = null
+    this.folderLoading = true
+    this.setSidebarVisible(true)
+    this.side_.setMode('files')
+    this.schedulePersist()
+    await this.refreshFolder()
+    this.setMessage(`已打开文件夹：${result.value}`)
+  }
+
+  private async refreshFolder(): Promise<void> {
+    if (this.folderRoot === null) {
+      this.folderEntries = []
+      this.folderLoading = false
+      this.folderError = null
+      this.pushFolderView()
+      return
+    }
+    const dir = this.folderRoot
+    this.folderLoading = true
+    this.pushFolderView()
+    const result = await window.mdforge.listFolder(dir)
+    // 读取期间又换了文件夹：这份结果已经过期
+    if (dir !== this.folderRoot) return
+    this.folderLoading = false
+    if (result.ok) {
+      this.folderEntries = result.value
+      this.folderError = null
+    } else {
+      this.folderEntries = []
+      this.folderError = result.error.message
+    }
+    this.pushFolderView()
+  }
+
+  private pushFolderView(): void {
+    this.side_.renderFiles({
+      dir: this.folderRoot,
+      entries: this.folderEntries,
+      loading: this.folderLoading,
+      error: this.folderError
+    })
+  }
+
+  /** 视图 → 文档检查：面板切到检查页并跑一次 */
+  openInspect(): void {
+    this.setSidebarVisible(true)
+    this.side_.setMode('issues')
+  }
+
+  sidebarVisible(): boolean {
+    return this.sidebarOn
+  }
+
+  setSidebarVisible(on: boolean): void {
+    if (this.sidebarOn === on) return
+    this.sidebarOn = on
+    this.applySidebar()
+    this.schedulePersist()
+  }
+
+  toggleSidebar(): void {
+    this.setSidebarVisible(!this.sidebarOn)
+  }
+
+  private applySidebar(): void {
+    this.deps.outline.classList.toggle('is-hidden', !this.sidebarOn)
   }
 
   // ---- 导出 ----
@@ -1158,6 +1248,7 @@ export class Workspace {
     this.refreshName()
     this.renderAutoSaveButton()
     this.updateMetrics()
+    this.side_.setActiveFile(this.active()?.state.path ?? null)
     this.updateOutline()
     this.renderStatus()
   }
@@ -1175,6 +1266,8 @@ export class Workspace {
       openDocs,
       active,
       recents: this.recents,
+      folder: this.folderRoot,
+      sidebar: this.sidebarOn,
       autoSave: this.autoSave,
       export: this.exportOptions,
       theme: this.deps.themeMode(),
@@ -1195,6 +1288,13 @@ export class Workspace {
     this.contentWidthMode = normalizeContentWidth(session?.contentWidth) ?? DEFAULT_CONTENT_WIDTH
     this.applyViewPrefs()
     this.renderAutoSaveButton()
+
+    // 文件页与会话里的文件夹：重启后面板直接能看（主进程已按会话重新授权）
+    this.folderRoot = session?.folder ?? null
+    this.sidebarOn = session?.sidebar ?? true
+    this.applySidebar()
+    if (this.folderRoot === null) this.pushFolderView()
+    else void this.refreshFolder()
 
     const paths = startup.length > 0 ? startup : (session?.openDocs ?? [])
     for (const path of paths) {

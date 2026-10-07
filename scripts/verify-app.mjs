@@ -1131,7 +1131,7 @@ check(
 check('主动放弃会连草稿一起丢', draftCount() === 0, `drafts=${draftCount()}`)
 await Promise.race([closing12, new Promise((resolve) => setTimeout(resolve, 3000))])
 
-/* 导出与文档检查：资源复制/内联、目录与主题、纯文本副本，以及检查面板 */
+/* 导出与文档检查：资源复制/内联、目录与主题、纯文本副本，以及检查面板、文件列表与侧边栏开关 */
 const expDir = mkdtempSync(path.join(tmpdir(), 'mdforge-export-'))
 mkdirSync(path.join(expDir, 'assets'), { recursive: true })
 writeFileSync(path.join(expDir, 'assets', 'p1.png'), makePng(640, 120))
@@ -1434,8 +1434,11 @@ await win13.waitForTimeout(350)
 check('再切一次恢复渲染', (await win13.locator('.mdf-preview-img').count()) >= 1)
 await win13.screenshot({ path: path.join(root, 'verify', 'menubar.png') })
 
-/* 文档检查面板 */
-await win13.click('.side-tab[data-side-tab="issues"]')
+/* 文档检查面板：标签位让给了文件页，入口在「视图 → 文档检查」 */
+await ensureMenuClosed()
+await win13.click('.mdf-menubar-button[data-menu="view"]')
+await win13.waitForSelector('.mdf-menu--bar')
+await win13.locator('.mdf-menu-item[data-menu-label="文档检查"]').click()
 await win13.waitForSelector('.issue-item', { timeout: 9000 })
 const heads = await win13.$$eval('.issue-group-head', (els) => els.map((el) => el.textContent))
 check(
@@ -1465,9 +1468,9 @@ check(
   details.some((text) => text.includes('正文里没有引用'))
 )
 check(
-  '页签带上问题计数',
-  (await win13.textContent('.side-tab[data-side-tab="issues"]')).includes('检查 5'),
-  await win13.textContent('.side-tab[data-side-tab="issues"]')
+  '检查结果给问题总数',
+  (await win13.textContent('.issues-summary')).includes('5 个问题'),
+  await win13.textContent('.issues-summary')
 )
 check(
   '笔记说明本地引用查了几个、外部链接不联网',
@@ -1490,6 +1493,12 @@ const unusedLine = await win13
 check('未引用资源没有行号，只给显示入口', unusedLine === '0', `line=${unusedLine}`)
 await win13.screenshot({ path: path.join(root, 'verify', 'issues.png') })
 
+/* 后面要留一个"脏标签"验证关闭确认：中途的菜单往返会撞上 3 秒自动保存把文档写干净，先关掉 */
+if ((await win13.textContent('#btn-autosave')).includes('开')) {
+  await win13.click('#btn-autosave')
+  await win13.waitForTimeout(200)
+}
+
 await win13.locator('.cm-line').first().click()
 await win13.keyboard.type('（改动）')
 await win13.waitForTimeout(500)
@@ -1498,11 +1507,111 @@ check(
   (await win13.textContent('.issues-note')).includes('建议重新检查'),
   await win13.textContent('.issues-note')
 )
+
+/* 打开文件夹 → 文件页预览列表 → 视图侧边栏开关 */
+const folderFixture = path.join(workDir, '笔记文件夹')
+mkdirSync(folderFixture, { recursive: true })
+writeFileSync(path.join(folderFixture, 'day01.md'), '# Day 1 命令行入门\n\n第一条笔记。\n', 'utf8')
+writeFileSync(path.join(folderFixture, 'day02.md'), '# Day 2 环境初始化\n\n第二条笔记。\n', 'utf8')
+await app13.evaluate(({ dialog }, dir) => {
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dir] })
+}, folderFixture)
+
+await ensureMenuClosed()
+await win13.click('.mdf-menubar-button[data-menu="file"]')
+await win13.waitForSelector('.mdf-menu--bar')
+check('文件菜单有「打开文件夹…」', (await menuLabels(win13)).includes('打开文件夹…'), '')
+await win13.locator('.mdf-menu-item[data-menu-label="打开文件夹…"]').click()
+await win13.waitForSelector('.file-item', { timeout: 9000 })
+const fileItems = await win13.$$eval('.file-item', (els) =>
+  els.map((el) => ({
+    name: el.querySelector('.file-name')?.innerText ?? '',
+    preview: el.querySelector('.file-preview')?.textContent ?? ''
+  }))
+)
+check('文件页列出文件夹里的 md', fileItems.length === 2, JSON.stringify(fileItems))
+check(
+  '列表按名称排序并带首行预览',
+  fileItems[0]?.name.includes('day01.md') &&
+    fileItems[0]?.preview.includes('Day 1 命令行入门') &&
+    fileItems[1]?.name.includes('day02.md') &&
+    fileItems[1]?.preview.includes('Day 2 环境初始化'),
+  JSON.stringify(fileItems)
+)
+check(
+  '打开文件夹后自动切到文件页',
+  await win13.evaluate(
+    () => document.querySelector('.side-tab[data-side-tab="files"]')?.classList.contains('is-active') === true
+  )
+)
+
+await win13.locator('.file-item').first().click()
+await win13.waitForTimeout(500)
+check('点列表项在标签里打开', (await win13.textContent('#file-name')).includes('day01.md'), await win13.textContent('#file-name'))
+check(
+  '当前文件在列表里高亮',
+  (await win13.$$eval('.file-item.is-active', (els) => els.map((el) => el.dataset.filePath))).some((p) =>
+    p?.endsWith('day01.md')
+  )
+)
+await win13.screenshot({ path: path.join(root, 'verify', 'files-panel.png') })
+await win13.locator('.tab-close').nth(1).click()
+await win13.waitForTimeout(300)
+
+/* 视图 → 侧边栏开关 */
+await win13.click('.mdf-menubar-button[data-menu="view"]')
+await win13.waitForSelector('.mdf-menu--bar')
+check('视图菜单有侧边栏开关且默认勾选', (await menuMark('侧边栏')) === '✓', await menuMark('侧边栏'))
+await win13.locator('.mdf-menu-item[data-menu-label="侧边栏"]').click()
+await win13.waitForTimeout(250)
+const hiddenBox = await win13.locator('#outline').boundingBox()
+check('关掉侧边栏后整列隐藏', hiddenBox === null, JSON.stringify(hiddenBox))
+await win13.locator('.mdf-menu-item[data-menu-label="侧边栏"]').click()
+await win13.waitForTimeout(250)
+const shownBox = await win13.locator('#outline').boundingBox()
+check('再点一次又显示', shownBox !== null && shownBox.width > 0, JSON.stringify(shownBox))
+await ensureMenuClosed()
+
 await win13.locator('.tab-close').first().click()
 await win13.waitForSelector('.mdf-dialog')
 await answer(win13, '不保存关闭')
 await win13.waitForTimeout(300)
 await app13.close()
+
+/* 重启后从「最近打开」进：会话里的历史路径要重新授权，不能报"未经用户选择授权" */
+const recentDir = mkdtempSync(path.join(tmpdir(), 'mdforge-recent-'))
+const recentFile = path.join(recentDir, '昨日笔记.md')
+writeFileSync(recentFile, '# 昨天的笔记\n\n重启后从最近打开进来。\n', 'utf8')
+clearDrafts()
+mkdirSync(userData, { recursive: true })
+writeFileSync(
+  path.join(userData, 'session.json'),
+  JSON.stringify({ openDocs: [], active: null, recents: [recentFile], autoSave: false }, null, 2),
+  'utf8'
+)
+const app14 = await _electron.launch({ executablePath: require('electron'), args: [root], cwd: root })
+const win14 = await app14.firstWindow()
+win14.on('dialog', (d) => {
+  nativeDialogs += 1
+  d.accept().catch(() => {})
+})
+win14.on('pageerror', (e) => pageErrors.push(e.message))
+await win14.waitForSelector('.cm-content')
+await win14.waitForTimeout(600)
+await win14.click('.mdf-menubar-button[data-menu="file"]')
+await win14.waitForSelector('.mdf-menu--bar')
+await win14.click('.mdf-menu-item[data-menu-label="最近打开"]')
+await win14.waitForSelector('.mdf-menu--sub .mdf-menu-item[data-menu-label="昨日笔记.md"]', { timeout: 5000 })
+await win14.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="昨日笔记.md"]').click()
+await win14.waitForTimeout(600)
+const recentStatus = await win14.textContent('#status')
+check(
+  '重启后从最近打开能读到文件',
+  (await win14.textContent('#file-name')).includes('昨日笔记.md'),
+  await win14.textContent('#file-name')
+)
+check('最近打开不再报无权限', !recentStatus.includes('拒绝访问'), recentStatus)
+await app14.close()
 
 const windowStateFile = path.join(process.env.APPDATA ?? homedir(), 'mdforge-editor', 'window-state.json')
 check('关闭时记住窗口尺寸位置', existsSync(windowStateFile), windowStateFile)

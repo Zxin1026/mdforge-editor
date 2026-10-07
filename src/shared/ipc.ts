@@ -239,11 +239,23 @@ export interface AssetWriteResult {
   name: string
 }
 
+/** 文件列表面板的一条：已授权文件夹里的可打开文件 */
+export interface FolderEntry {
+  name: string
+  path: string
+  /** 首行预览（跳过 front matter、剥掉行首标记），列表里当副标题 */
+  preview: string
+}
+
 /** 重启后恢复的会话：打开的标签顺序、当前标签、最近打开列表 */
 export interface SessionData {
   openDocs: string[]
   active: string | null
   recents: string[]
+  /** 上次打开的文件夹（文件列表面板），缺省视为没有 */
+  folder?: string | null
+  /** 侧边栏是否显示，缺省视为显示 */
+  sidebar?: boolean
   /** 自动保存开关，缺省视为开启 */
   autoSave?: boolean
   /** 上次用的导出选项，缺省回落到 DEFAULT_EXPORT_OPTIONS */
@@ -265,6 +277,10 @@ export const AUTOSAVE_DELAY_MS = 3000
 export interface FileApi {
   open(): Promise<FileResult<FileSnapshot | null>>
   openMany(): Promise<FileResult<string[]>>
+  /** 打开文件夹：系统目录框选完后登记为可读根，返回选中的目录（取消为 null） */
+  openFolder(): Promise<FileResult<string | null>>
+  /** 列出已授权文件夹里的可打开文件（直接子级，带首行预览） */
+  listFolder(dir: string): Promise<FileResult<FolderEntry[]>>
   saveAs(text: string, meta: FileMeta): Promise<FileResult<FileSnapshot>>
   read(path: string): Promise<FileResult<FileSnapshot>>
   /** 按用户指定的编码重新解码磁盘上的原始字节：检测结果错判时的纠正入口 */
@@ -312,6 +328,8 @@ export interface FileApi {
 export const CHANNEL = {
   open: 'mdforge:fs:open',
   openMany: 'mdforge:fs:open-many',
+  openFolder: 'mdforge:fs:open-folder',
+  listFolder: 'mdforge:fs:list-folder',
   saveAs: 'mdforge:fs:save-as',
   read: 'mdforge:fs:read',
   readAs: 'mdforge:fs:read-as',

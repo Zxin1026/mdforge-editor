@@ -69,6 +69,7 @@ async function boot(): Promise<void> {
   const menuCtx: AppMenuContext = {
     newDoc: () => workspace.openNew(),
     openDoc: () => void workspace.openViaDialog(),
+    openFolder: () => void workspace.openFolderViaDialog(),
     save: () => void workspace.save(),
     saveAs: () => void workspace.saveAs(),
     saveAll: () => void workspace.saveAll(),
@@ -82,6 +83,9 @@ async function boot(): Promise<void> {
     editorFacts: () => workspace.editorFacts(),
     sourceMode: () => workspace.sourceMode(),
     toggleSourceMode: () => workspace.toggleSourceMode(),
+    sidebar: () => workspace.sidebarVisible(),
+    toggleSidebar: () => workspace.toggleSidebar(),
+    inspect: () => workspace.openInspect(),
     zoom: () => workspace.zoom(),
     zoomIn: () => workspace.zoomIn(),
     zoomOut: () => workspace.zoomOut(),

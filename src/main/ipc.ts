@@ -25,7 +25,16 @@ import { probeResources } from './fs/resource-check'
 import { draftClear, draftList, draftWrite } from './fs/draft-store'
 import { readSession, writeSession } from './fs/session'
 import { onExternalChange, unwatchFile, watchFile } from './fs/watch'
-import { grantPath, isGranted, isUnderGrantedRoot, readFile, readFileWithEncoding, writeFile } from './fs/file-store'
+import { listFolder } from './fs/folder'
+import {
+  grantFolder,
+  grantPath,
+  isGranted,
+  isUnderGrantedRoot,
+  readFile,
+  readFileWithEncoding,
+  writeFile
+} from './fs/file-store'
 
 const MARKDOWN_FILTERS = [
   { name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] },
@@ -192,6 +201,28 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
     return true
   })
 
+  ipcMain.handle(CHANNEL.openFolder, () =>
+    guarded(async () => {
+      const choice = await dialog.showOpenDialog({
+        title: '打开文件夹',
+        properties: ['openDirectory'],
+        defaultPath: lastDir ?? undefined
+      })
+      if (choice.canceled || choice.filePaths.length === 0) return null
+      const dir = choice.filePaths[0]
+      lastDir = dir
+      grantFolder(dir)
+      return dir
+    })
+  )
+
+  ipcMain.handle(CHANNEL.listFolder, (_event, target: unknown) =>
+    guarded(() => {
+      if (typeof target !== 'string' || !target) throw new FileOpError('invalid-path', '文件夹路径不合法')
+      return listFolder(target)
+    })
+  )
+
   ipcMain.handle(CHANNEL.read, (_event, target: string) =>
     guarded(async () => {
       // 文内相对链接指向的 md：与已打开文档同目录（或在已授权文件夹内）时自动放行
@@ -325,10 +356,13 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
     try {
       const session = await readSession()
       if (!session) return null
-      // 会话里的文件是用户此前真实打开过的，恢复时重新授权（仅限 Markdown 家族）
-      for (const p of session.openDocs) {
+      // 会话里的文件是用户此前真实打开过的，恢复时重新授权（仅限 Markdown 家族）；
+      // 最近打开也要续上，否则重启后从菜单点进来会撞 not-granted
+      for (const p of [...session.openDocs, ...session.recents]) {
         if (p && MD_EXT.has(path.extname(p).toLowerCase())) grantPath(p)
       }
+      // 打开过的文件夹同样恢复授权，文件列表面板重启后还能读
+      if (session.folder) grantFolder(session.folder)
       return session
     } catch {
       return null

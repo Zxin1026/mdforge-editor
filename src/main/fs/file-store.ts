@@ -46,6 +46,11 @@ function underFolderRoot(resolvedKey: string): boolean {
   return false
 }
 
+/** 目录是否落在"打开文件夹"选过的根下（含根本身）：文件列表面板用 */
+export function isUnderFolderRoot(target: string): boolean {
+  return underFolderRoot(cacheKeyOf(path.resolve(target)))
+}
+
 /** 资源协议用：允许读取已打开文档所在目录，或已授权文件夹下的文件 */
 export function isUnderGrantedRoot(target: string): boolean {
   const key = cacheKeyOf(path.resolve(target))
