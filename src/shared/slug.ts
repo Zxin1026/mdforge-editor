@@ -1,0 +1,27 @@
+const REMOVED = /[^\p{L}\p{N} \-_]/gu
+
+export interface Slugger {
+  slug(text: string): string
+}
+
+/**
+ * GitHub 风格的锚点：保留中日韩字符与字母数字，去掉标点，空格转连字符，
+ * 重复标题追加 -1 / -2。编辑器大纲与导出 HTML 必须共用同一个实例，
+ * 否则重复标题的计数会错位，目录链接指向不存在的锚点。
+ */
+export function createSlugger(): Slugger {
+  const counts = new Map<string, number>()
+
+  return {
+    slug(text: string): string {
+      const base = text.trim().toLowerCase().replace(REMOVED, '').replace(/ /g, '-')
+      const seen = counts.get(base) ?? 0
+      counts.set(base, seen + 1)
+      return seen === 0 ? base : `${base}-${seen}`
+    }
+  }
+}
+
+export function slugOnce(text: string): string {
+  return createSlugger().slug(text)
+}

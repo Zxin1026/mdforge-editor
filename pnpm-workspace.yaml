@@ -1,0 +1,9 @@
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+
+# app-builder-lib@26 用了 @electron/get v4+ 的 API（ElectronDownloadCacheMode、cacheMode），
+# 依赖范围却仍写着 ^3；npm 靠提升会拿到 5.x 才碰巧能跑，pnpm 严格解析会拿到 3.0.0 直接崩。
+overrides:
+  'app-builder-lib>@electron/get': ^5.1.0

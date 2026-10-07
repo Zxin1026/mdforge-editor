@@ -1,0 +1,43 @@
+# electron-builder 打包配置：NSIS 安装包 + 便携版，注册 .md 等文件关联
+appId: com.mdforge.editor
+productName: MDForge
+copyright: Copyright © 2026 MDForge
+directories:
+  output: dist
+  buildResources: build
+# 直接用已安装的 Electron 解包目录，省去下载（版本与本机一致，最稳）
+electronDist: node_modules/electron/dist
+# 只保留中英语言包，其余 40 多个 locales 不打包
+electronLanguages:
+  - zh-CN
+  - en-US
+files:
+  - out/**
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+fileAssociations:
+  - ext:
+      - md
+      - markdown
+      - mdown
+      - mkd
+    name: Markdown 文档
+    description: Markdown 文档
+    role: Editor
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MDForge
+  artifactName: ${productName}-${version}-setup.${ext}
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
