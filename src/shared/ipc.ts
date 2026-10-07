@@ -239,12 +239,95 @@ export interface AssetWriteResult {
   name: string
 }
 
-/** 文件列表面板的一条：已授权文件夹里的可打开文件 */
+/** 文件树的一条：已授权文件夹里的文件或子目录 */
 export interface FolderEntry {
   name: string
   path: string
-  /** 首行预览（跳过 front matter、剥掉行首标记），列表里当副标题 */
+  kind: 'file' | 'dir'
+  /** 首行预览（跳过 front matter、剥掉行首标记），列表里当副标题；目录为空串 */
   preview: string
+}
+
+/** 工作区搜索的一处命中：行号与列号都是 1 起，列号相对 trim 后的行文本 */
+export interface WorkspaceMatch {
+  line: number
+  col: number
+  /** 命中片段长度，列表里高亮用 */
+  length: number
+  /** 命中行的文本（去掉行首空白，过长会截断） */
+  text: string
+}
+
+export interface WorkspaceFileHit {
+  path: string
+  name: string
+  /** 搜索时磁盘内容的 sha1：批量替换用它挡住搜索之后的外部改动 */
+  hash: string
+  matches: WorkspaceMatch[]
+  /** 命中太多被截断 */
+  truncated: boolean
+  /** 文件名本身也命中查询 */
+  nameMatch: boolean
+}
+
+export interface WorkspaceSearchInput {
+  dir: string
+  query: string
+  caseSensitive: boolean
+  regex: boolean
+}
+
+export interface WorkspaceSearchResult {
+  files: WorkspaceFileHit[]
+  /** 已收录的命中处数（截断时小于实际值） */
+  totalMatches: number
+  /** 扫描过的可打开文件数 */
+  scanned: number
+  truncated: boolean
+}
+
+export interface WorkspaceReplaceInput {
+  dir: string
+  query: string
+  caseSensitive: boolean
+  regex: boolean
+  replacement: string
+  /** 搜索结果的子集；hash 是搜索时的磁盘哈希，对不上就跳过（防覆盖外部改动） */
+  targets: Array<{ path: string; hash: string }>
+}
+
+export interface WorkspaceReplaceFile {
+  path: string
+  name: string
+  replaced: number
+  kind: 'ok' | 'skipped' | 'error'
+  /** skipped / error 的原因 */
+  detail?: string
+}
+
+export interface WorkspaceReplaceResult {
+  files: WorkspaceReplaceFile[]
+  replacedFiles: number
+  replacedMatches: number
+}
+
+/** 链接索引：文件夹里每个文档的出链（只收指向文件夹内部文档的链接） */
+export interface DocRef {
+  path: string
+  name: string
+}
+
+export interface DocLink {
+  from: string
+  to: string
+  line: number
+  /** 链接所在行的文本，反向链接列表里显示 */
+  text: string
+}
+
+export interface LinkIndexResult {
+  files: DocRef[]
+  links: DocLink[]
 }
 
 /** 重启后恢复的会话：打开的标签顺序、当前标签、最近打开列表 */
@@ -254,6 +337,8 @@ export interface SessionData {
   recents: string[]
   /** 上次打开的文件夹（文件列表面板），缺省视为没有 */
   folder?: string | null
+  /** 文件树里收藏的文件/文件夹路径，缺省视为空 */
+  favorites?: string[]
   /** 侧边栏是否显示，缺省视为显示 */
   sidebar?: boolean
   /** 自动保存开关，缺省视为开启 */
@@ -279,8 +364,20 @@ export interface FileApi {
   openMany(): Promise<FileResult<string[]>>
   /** 打开文件夹：系统目录框选完后登记为可读根，返回选中的目录（取消为 null） */
   openFolder(): Promise<FileResult<string | null>>
-  /** 列出已授权文件夹里的可打开文件（直接子级，带首行预览） */
+  /** 列出已授权文件夹里的可打开文件与子目录（直接子级，文件带首行预览） */
   listFolder(dir: string): Promise<FileResult<FolderEntry[]>>
+  /** 在已授权文件夹里新建子目录，返回新目录绝对路径 */
+  createFolder(dir: string, name: string): Promise<FileResult<string>>
+  /** 重命名文件或文件夹（不改位置），返回新路径 */
+  renamePath(target: string, name: string): Promise<FileResult<string>>
+  /** 把文件或文件夹移动到另一个目录下，返回新路径 */
+  movePath(target: string, destDir: string): Promise<FileResult<string>>
+  /** 工作区全文搜索：文件名 + 内容，支持正则 */
+  searchWorkspace(input: WorkspaceSearchInput): Promise<FileResult<WorkspaceSearchResult>>
+  /** 批量替换：按搜索给的哈希逐个核对后写回，保留各自编码 */
+  replaceWorkspace(input: WorkspaceReplaceInput): Promise<FileResult<WorkspaceReplaceResult>>
+  /** 扫描文件夹内文档之间的链接（反向链接与关系图的数据来源） */
+  scanLinks(dir: string): Promise<FileResult<LinkIndexResult>>
   saveAs(text: string, meta: FileMeta): Promise<FileResult<FileSnapshot>>
   read(path: string): Promise<FileResult<FileSnapshot>>
   /** 按用户指定的编码重新解码磁盘上的原始字节：检测结果错判时的纠正入口 */
@@ -308,6 +405,8 @@ export interface FileApi {
   answerWindowClose(allow: boolean): void
   /** 菜单里的剪切/复制/粘贴走主进程剪贴板，菜单按钮拿到焦点后浏览器原生命令不可用 */
   clipboardReadText(): Promise<string>
+  /** 菜单粘贴优先用的 HTML 形式：和编辑器里的 Ctrl+V 一样对齐 Typora 的富文本粘贴 */
+  clipboardReadHtml(): Promise<string>
   clipboardWriteText(text: string): Promise<boolean>
   /** 视图菜单：全屏 / 置顶 / 开发者工具 / 缩放，都作用于主窗口 */
   toggleFullScreen(): Promise<boolean>
@@ -330,6 +429,12 @@ export const CHANNEL = {
   openMany: 'mdforge:fs:open-many',
   openFolder: 'mdforge:fs:open-folder',
   listFolder: 'mdforge:fs:list-folder',
+  createFolder: 'mdforge:fs:create-folder',
+  renamePath: 'mdforge:fs:rename',
+  movePath: 'mdforge:fs:move',
+  searchWorkspace: 'mdforge:fs:search',
+  replaceWorkspace: 'mdforge:fs:replace',
+  scanLinks: 'mdforge:fs:scan-links',
   saveAs: 'mdforge:fs:save-as',
   read: 'mdforge:fs:read',
   readAs: 'mdforge:fs:read-as',
@@ -354,6 +459,7 @@ export const CHANNEL = {
   windowClose: 'mdforge:window:close',
   windowCloseAnswer: 'mdforge:window:close-answer',
   clipboardRead: 'mdforge:clipboard:read',
+  clipboardReadHtml: 'mdforge:clipboard:read-html',
   clipboardWrite: 'mdforge:clipboard:write',
   toggleFullScreen: 'mdforge:window:full-screen',
   setAlwaysOnTop: 'mdforge:window:always-on-top',

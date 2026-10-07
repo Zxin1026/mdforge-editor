@@ -86,6 +86,13 @@ async function boot(): Promise<void> {
     sidebar: () => workspace.sidebarVisible(),
     toggleSidebar: () => workspace.toggleSidebar(),
     inspect: () => workspace.openInspect(),
+    workspaceSearch: () => workspace.openWorkspaceSearch(),
+    navBack: () => workspace.navBack(),
+    navForward: () => workspace.navForward(),
+    canNavBack: () => workspace.canNavBack(),
+    canNavForward: () => workspace.canNavForward(),
+    backlinks: () => workspace.openBacklinks(),
+    openGraph: () => workspace.openGraphView(),
     zoom: () => workspace.zoom(),
     zoomIn: () => workspace.zoomIn(),
     zoomOut: () => workspace.zoomOut(),
@@ -149,9 +156,26 @@ async function boot(): Promise<void> {
     } else if (key === 'w') {
       event.preventDefault()
       void workspace.closeActive()
+    } else if (key === 'f' && event.shiftKey) {
+      // Ctrl+Shift+F：在工作区里搜索（Ctrl+F 留给当前文档的查找面板）
+      event.preventDefault()
+      workspace.openWorkspaceSearch()
     } else if (key === 'h' && !event.shiftKey) {
       event.preventDefault()
       workspace.runActive('replace')
+    }
+  })
+
+  // 导航历史：Alt+← / Alt+→，与浏览器的习惯一致
+  window.addEventListener('keydown', (event) => {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    if (dialogOpen()) return
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      workspace.navBack()
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      workspace.navForward()
     }
   })
 

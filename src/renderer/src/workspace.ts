@@ -20,7 +20,7 @@ import {
   type ExternalChange,
   type FileErrorInfo,
   type FileSnapshot,
-  type FolderEntry
+  type LinkIndexResult
 } from '../../shared/ipc'
 import type { EditorAction, EditorFacts } from './editor/actions'
 import type { LinkTarget } from './editor/links'
@@ -28,6 +28,7 @@ import { askDialog } from './dialog'
 import { collectOutline } from './editor/outline'
 import { clearMermaidCache } from './editor/mermaid'
 import { createEditor, type MarkdownEditor } from './editor/view'
+import { openGraph } from './graph'
 import {
   ASSET_MODES,
   ASSET_MODE_LABELS,
@@ -41,7 +42,8 @@ import {
 import { buildHtml, deriveTitle, renderText } from './export/html'
 import type { MenuEntry, MenuHandle } from './menu'
 import { openMenu } from './menu'
-import { createSidePanel, type SidePanel } from './side-panel'
+import { createSidePanel, type LinksView, type SidePanel } from './side-panel'
+import type { ReplaceRequest } from './side/search-view'
 import { inspectDocument, type Issue } from './editor/inspect'
 import { createTabBar, type TabBar, type TabItem } from './tabs'
 import {
@@ -84,9 +86,19 @@ interface DocTab {
   suspended: boolean
 }
 
+/** 导航历史里的一站：标签 + 光标位置，后退/前进靠它还原现场 */
+interface NavPoint {
+  id: string
+  pos: number
+}
+
 const MAX_RECENTS = 12
+/** 导航历史的长度上限：够回溯一大段翻阅，又不会无限攒 */
+const MAX_NAV = 60
 /** 草稿落盘窗口：比会话持久化稍长，打字途中不必频繁写 userData */
 const DRAFT_DELAY_MS = 1200
+/** 正文停下多久后重跑文档检查（内联标记跟着更新） */
+const LINT_DELAY_MS = 800
 /** 缩放档位：跟着视图菜单的放大/缩小逐级走，和浏览器的比例习惯一致 */
 const ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
 
@@ -116,17 +128,22 @@ export class Workspace {
   private notifying = new Set<string>()
   /** 关窗确认进行中：主进程重复询问时不再叠第二个框 */
   private quitting = false
-  /** 文件列表面板：打开的文件夹与它的直接子级 md 列表 */
+  /** 文件树：打开的文件夹与收藏 */
   private folderRoot: string | null = null
-  private folderEntries: FolderEntry[] = []
-  private folderLoading = false
-  private folderError: string | null = null
+  private favorites: string[] = []
   private sidebarOn = true
+  /** 链接索引缓存：目录与内容都没变时反链/关系图直接复用 */
+  private linkIndex: LinkIndexResult | null = null
+  private linkIndexDir: string | null = null
+  /** 导航历史：后退/前进的站点栈 */
+  private navStack: NavPoint[] = []
+  private navIndex = -1
 
   private readonly tabs_: TabBar
   private readonly side_: SidePanel
   /** 检查请求的序号：切换文档后旧结果不能盖掉新结果 */
   private checkSeq = 0
+  private lintTimer: number | undefined
 
   constructor(private readonly deps: WorkspaceDeps) {
     this.tabs_ = createTabBar(deps.tabbar, {
@@ -135,16 +152,42 @@ export class Workspace {
       onNew: () => this.openNew()
     })
     this.side_ = createSidePanel(deps.outline, {
-      onPickOutline: (pos) => this.active()?.editor.jumpTo(pos),
+      onPickOutline: (pos) => {
+        this.noteNavPoint()
+        this.active()?.editor.jumpTo(pos)
+      },
       onPickIssue: (issue) => this.pickIssue(issue),
-      onRunCheck: () => void this.runCheck(),
+      onRunCheck: () => void this.runCheck(true),
+      onModeChange: (mode) => {
+        if (mode === 'issues') void this.runCheck(true)
+        else if (mode === 'outline') this.updateOutline()
+        else if (mode === 'links') void this.refreshBacklinks(false)
+      },
       onPickFile: (path) => void this.openPath(path),
       onOpenFolder: () => void this.openFolderViaDialog(),
-      onModeChange: (mode) => {
-        if (mode === 'issues') void this.runCheck()
-        else if (mode === 'outline') this.updateOutline()
-        else this.pushFolderView()
-      }
+      files: {
+        listDir: async (dir) => {
+          const result = await window.mdforge.listFolder(dir)
+          return result.ok ? { entries: result.value } : { error: result.error.message }
+        },
+        rename: (target, name) => this.renameEntry(target, name),
+        createFolder: (dir, name) => this.createEntry(dir, name),
+        move: (target, destDir) => this.moveEntry(target, destDir),
+        favorites: () => this.favorites,
+        toggleFavorite: (path) => this.toggleFavorite(path),
+        reveal: (path) => this.revealPath(path)
+      },
+      search: {
+        folderRoot: () => this.folderRoot,
+        openFolder: () => void this.openFolderViaDialog(),
+        folderName: () => (this.folderRoot === null ? '' : baseNameOf(this.folderRoot)),
+        search: (input) => window.mdforge.searchWorkspace(input),
+        replaceAll: (request) => this.runReplaceAll(request),
+        openHit: (path, line, col, length) => void this.openHit(path, line, col, length)
+      },
+      onPickBacklink: (path, line) => void this.openHit(path, line, 1, 0),
+      onRefreshLinks: () => void this.refreshBacklinks(true),
+      onOpenGraph: () => void this.showGraph()
     })
     deps.metaEl.addEventListener('click', () => this.toggleMetaMenu())
   }
@@ -184,6 +227,7 @@ export class Workspace {
         if (tab.active) {
           this.refreshName()
           this.renderTabs()
+          this.scheduleLint()
         }
         this.schedulePersist()
         this.scheduleDraft()
@@ -218,11 +262,14 @@ export class Workspace {
   }
 
   async openPath(path: string): Promise<void> {
+    // 先记下出发位置，再把新文档打开
+    this.noteNavPoint()
     const existing = this.find(path)
     if (existing) {
       // 已经打开且没改过：跟着磁盘走，避免展示过期内容
       if (isDirty(existing.state)) this.activate(existing.id)
       else if (await this.reloadTab(existing)) this.activate(existing.id)
+      this.noteNavPoint()
       return
     }
     const result = await window.mdforge.read(path)
@@ -231,6 +278,7 @@ export class Workspace {
       return
     }
     this.openSnapshot(result.value)
+    this.noteNavPoint()
   }
 
   /** 第二个实例送来新的启动参数（双击 .md 复用已开窗口）：重新拉取并逐个打开 */
@@ -299,8 +347,9 @@ export class Workspace {
     tab.editor.focus()
     this.refreshChrome()
     this.schedulePersist()
-    // 检查面板跟着当前文档走
-    if (this.side_.mode() === 'issues') void this.runCheck()
+    // 检查结果与反向链接都跟着当前文档走（静默检查：不在面板上闪"正在检查"）
+    void this.runCheck(false)
+    if (this.side_.mode() === 'links') void this.refreshBacklinks(false)
   }
 
   // ---- 写盘 / 导出 ----
@@ -371,9 +420,9 @@ export class Workspace {
     for (const path of result.value) await this.openPath(path)
   }
 
-  // ---- 文件夹与侧边栏 ----
+  // ---- 文件夹、文件操作与收藏 ----
 
-  /** 文件 → 打开文件夹：选目录、记进会话，面板切到文件页直接看列表 */
+  /** 文件 → 打开文件夹：选目录、记进会话，面板切到文件页直接看树 */
   async openFolderViaDialog(): Promise<void> {
     const result = await window.mdforge.openFolder()
     if (!result.ok) {
@@ -382,54 +431,339 @@ export class Workspace {
     }
     if (result.value === null) return
     this.folderRoot = result.value
-    this.folderEntries = []
-    this.folderError = null
-    this.folderLoading = true
+    this.linkIndex = null
+    this.linkIndexDir = null
     this.setSidebarVisible(true)
     this.side_.setMode('files')
+    this.side_.setFolderRoot(result.value)
     this.schedulePersist()
-    await this.refreshFolder()
     this.setMessage(`已打开文件夹：${result.value}`)
   }
 
-  private async refreshFolder(): Promise<void> {
-    if (this.folderRoot === null) {
-      this.folderEntries = []
-      this.folderLoading = false
-      this.folderError = null
-      this.pushFolderView()
-      return
+  private async renameEntry(target: string, name: string): Promise<boolean> {
+    const result = await window.mdforge.renamePath(target, name)
+    if (!result.ok) {
+      this.notify(result.error)
+      return false
     }
-    const dir = this.folderRoot
-    this.folderLoading = true
-    this.pushFolderView()
-    const result = await window.mdforge.listFolder(dir)
-    // 读取期间又换了文件夹：这份结果已经过期
-    if (dir !== this.folderRoot) return
-    this.folderLoading = false
-    if (result.ok) {
-      this.folderEntries = result.value
-      this.folderError = null
-    } else {
-      this.folderEntries = []
-      this.folderError = result.error.message
-    }
-    this.pushFolderView()
+    this.applyPathChange(target, result.value)
+    this.setMessage(`已重命名为：${baseNameOf(result.value)}`)
+    return true
   }
 
-  private pushFolderView(): void {
-    this.side_.renderFiles({
-      dir: this.folderRoot,
-      entries: this.folderEntries,
-      loading: this.folderLoading,
-      error: this.folderError
-    })
+  private async createEntry(dir: string, name: string): Promise<boolean> {
+    const result = await window.mdforge.createFolder(dir, name)
+    if (!result.ok) {
+      this.notify(result.error)
+      return false
+    }
+    this.linkIndex = null
+    this.setMessage(`已新建文件夹：${baseNameOf(result.value)}`)
+    return true
+  }
+
+  private async moveEntry(target: string, destDir: string): Promise<boolean> {
+    const result = await window.mdforge.movePath(target, destDir)
+    if (!result.ok) {
+      this.notify(result.error)
+      return false
+    }
+    this.applyPathChange(target, result.value)
+    this.setMessage(`已移动到：${result.value}`)
+    return true
+  }
+
+  /** 重命名/移动之后同步所有引用旧路径的地方：标签、最近打开、收藏 */
+  private applyPathChange(oldPath: string, newPath: string): void {
+    const oldKey = oldPath.toLowerCase()
+    const prefix = `${oldKey}\\`
+    const prefixAlt = `${oldKey}/`
+    const affected = (candidate: string): boolean => {
+      const key = candidate.toLowerCase()
+      return key === oldKey || key.startsWith(prefix) || key.startsWith(prefixAlt)
+    }
+    const rewrite = (candidate: string): string =>
+      candidate.toLowerCase() === oldKey ? newPath : `${newPath}${candidate.slice(oldPath.length)}`
+
+    for (const tab of this.tabs) {
+      const previous = tab.state.path
+      if (previous === null || !affected(previous)) continue
+      const next = rewrite(previous)
+      tab.state = { ...tab.state, path: next }
+      const previousKey = tab.key
+      tab.key = draftKeyOf(next, tab.id)
+      tab.editor.setDocPath(next)
+      void window.mdforge.draftClear([previousKey, tab.key])
+      void window.mdforge.unwatch(previous)
+      void window.mdforge.watch(next)
+    }
+    this.recents = this.recents.map((path) => (affected(path) ? rewrite(path) : path))
+    this.favorites = this.favorites.map((path) => (affected(path) ? rewrite(path) : path))
+    this.linkIndex = null
+    this.side_.syncFavorites()
+    this.refreshChrome()
+    this.schedulePersist()
+  }
+
+  private toggleFavorite(path: string): void {
+    const key = path.toLowerCase()
+    const exists = this.favorites.some((item) => item.toLowerCase() === key)
+    this.favorites = exists
+      ? this.favorites.filter((item) => item.toLowerCase() !== key)
+      : [...this.favorites, path].slice(0, 30)
+    this.side_.syncFavorites()
+    this.schedulePersist()
+    this.setMessage(exists ? `已取消收藏：${baseNameOf(path)}` : `已收藏：${baseNameOf(path)}`)
+  }
+
+  private revealPath(path: string): void {
+    void window.mdforge.reveal(path)
+    this.setMessage(`已在文件夹中显示：${path}`)
   }
 
   /** 视图 → 文档检查：面板切到检查页并跑一次 */
   openInspect(): void {
     this.setSidebarVisible(true)
     this.side_.setMode('issues')
+  }
+
+  /** Ctrl+Shift+F / 编辑菜单：切到搜索页并聚焦输入框 */
+  openWorkspaceSearch(): void {
+    this.setSidebarVisible(true)
+    this.side_.focusSearch()
+  }
+
+  /** 导航 → 反向链接：面板切到链接页 */
+  openBacklinks(): void {
+    this.setSidebarVisible(true)
+    this.side_.setMode('links')
+  }
+
+  /** 导航 → 文档关系图 */
+  openGraphView(): void {
+    void this.showGraph()
+  }
+
+  // ---- 搜索与批量替换 ----
+
+  /** 打开搜索命中：先开文档再选中命中片段 */
+  private async openHit(path: string, line: number, col: number, length: number): Promise<void> {
+    this.noteNavPoint()
+    await this.openPath(path)
+    if (line <= 0) return
+    const tab = this.find(path)
+    if (!tab) return
+    const doc = tab.editor.state().doc
+    if (line > doc.lines) return
+    const row = doc.line(line)
+    const from = Math.min(row.to, row.from + Math.max(0, col - 1))
+    const to = Math.min(row.to, from + Math.max(1, length))
+    tab.editor.selectRange(from, to)
+  }
+
+  /** 全部替换：确认后经主进程写盘，再把开着的干净标签跟着重载 */
+  private async runReplaceAll(request: ReplaceRequest): Promise<boolean> {
+    const dir = this.folderRoot
+    if (dir === null) return false
+
+    // 有未保存改动的打开文档要排除：盘上替换会和编辑器内容打架
+    const dirty = new Set(
+      this.tabs
+        .filter((tab) => tab.state.path !== null && isDirty(tab.state))
+        .map((tab) => tab.state.path!.toLowerCase())
+    )
+    const targets = request.result.files
+      .filter((file) => !dirty.has(file.path.toLowerCase()))
+      .map((file) => ({ path: file.path, hash: file.hash }))
+    const skippedDirty = request.result.files.length - targets.length
+    if (targets.length === 0) {
+      this.setMessage(skippedDirty > 0 ? `还有 ${skippedDirty} 个文件没保存，先保存再替换` : '没有可替换的文件')
+      return false
+    }
+
+    const go = await askDialog<boolean>({
+      title: '在工作区中全部替换？',
+      body: `将在 ${targets.length} 个文件的 ${request.result.totalMatches} 处命中里把“${shorten(request.query)}”替换为“${shorten(request.replacement)}”。`,
+      note:
+        skippedDirty > 0
+          ? `另有 ${skippedDirty} 个文件有未保存修改，已跳过；保存后可以再替换它们。`
+          : '替换会直接写回磁盘，不进入撤销历史。',
+      options: [
+        { label: '替换', value: true, kind: 'danger' },
+        { label: '取消', value: false, kind: 'default' }
+      ],
+      cancelValue: false
+    })
+    if (!go) return false
+
+    const response = await window.mdforge.replaceWorkspace({
+      dir,
+      query: request.query,
+      caseSensitive: request.caseSensitive,
+      regex: request.regex,
+      replacement: request.replacement,
+      targets
+    })
+    if (!response.ok) {
+      this.notify(response.error)
+      return false
+    }
+
+    const outcome = response.value
+    this.linkIndex = null
+    const replacedPaths = new Set(
+      outcome.files.filter((file) => file.replaced > 0).map((file) => file.path.toLowerCase())
+    )
+    for (const tab of this.tabs) {
+      const path = tab.state.path
+      if (path === null || !replacedPaths.has(path.toLowerCase())) continue
+      // 排除过的脏标签此时一定不在 replacedPaths 里；这里都是干净标签
+      await this.reloadTab(tab)
+    }
+    const problems = outcome.files.filter((file) => file.kind !== 'ok')
+    const note = problems.length > 0 ? `（${problems.length} 个文件被跳过：${problems[0].detail ?? '原因不明'}）` : ''
+    this.setMessage(`已在 ${outcome.replacedFiles} 个文件替换 ${outcome.replacedMatches} 处${note}`)
+    void this.runCheck(false)
+    return true
+  }
+
+  // ---- 反向链接与关系图 ----
+
+  /** 链接索引按需扫描；目录没变时复用缓存 */
+  private async ensureLinkIndex(force: boolean): Promise<LinkIndexResult | null> {
+    const dir = this.folderRoot
+    if (dir === null) return null
+    if (!force && this.linkIndex !== null && this.linkIndexDir === dir) return this.linkIndex
+    const result = await window.mdforge.scanLinks(dir)
+    if (!result.ok) {
+      this.notify(result.error)
+      return null
+    }
+    this.linkIndex = result.value
+    this.linkIndexDir = dir
+    return result.value
+  }
+
+  async refreshBacklinks(force: boolean): Promise<void> {
+    const dir = this.folderRoot
+    const tab = this.active()
+    const docPath = tab?.state.path ?? null
+    const docName = tab ? displayNameOf(tab.state) : '未命名'
+    const base: LinksView = {
+      dir,
+      docPath,
+      docName,
+      loading: dir !== null,
+      error: null,
+      totalDocs: this.linkIndex?.files.length ?? 0,
+      totalLinks: this.linkIndex?.links.length ?? 0,
+      backlinks: []
+    }
+    this.side_.renderLinks(base)
+    if (dir === null) {
+      this.side_.renderLinks({ ...base, loading: false })
+      return
+    }
+
+    const index = await this.ensureLinkIndex(force)
+    if (index === null) {
+      this.side_.renderLinks({ ...base, loading: false, error: this.lastError?.message ?? '链接扫描失败' })
+      return
+    }
+    const key = docPath?.toLowerCase() ?? ''
+    const backlinks = index.links
+      .filter((link) => link.to.toLowerCase() === key)
+      .map((link) => ({ path: link.from, name: baseNameOf(link.from), line: link.line, text: link.text }))
+    this.side_.renderLinks({
+      dir,
+      docPath,
+      docName,
+      loading: false,
+      error: null,
+      totalDocs: index.files.length,
+      totalLinks: index.links.length,
+      backlinks
+    })
+  }
+
+  /** 导航 → 文档关系图 */
+  private async showGraph(): Promise<void> {
+    if (this.folderRoot === null) {
+      this.setMessage('先在「文件 → 打开文件夹…」选一个文件夹，才能看关系图')
+      return
+    }
+    const index = await this.ensureLinkIndex(false)
+    if (index === null) return
+    openGraph({
+      files: index.files,
+      links: index.links,
+      current: this.active()?.state.path ?? null,
+      onPick: (path) => {
+        this.noteNavPoint()
+        void this.openPath(path)
+      }
+    })
+  }
+
+  // ---- 导航历史 ----
+
+  /** 把当前位置压进历史（打字不动光标则不重复记录）；从中间出发会砍掉前进分支 */
+  private noteNavPoint(): void {
+    const tab = this.active()
+    if (!tab) return
+    const pos = tab.editor.cursorPos()
+    const top = this.navStack[this.navIndex]
+    if (top && top.id === tab.id && top.pos === pos) return
+    if (this.navIndex < this.navStack.length - 1) this.navStack.splice(this.navIndex + 1)
+    this.navStack.push({ id: tab.id, pos })
+    this.navIndex = this.navStack.length - 1
+    if (this.navStack.length > MAX_NAV) {
+      this.navStack.shift()
+      this.navIndex -= 1
+    }
+  }
+
+  /** 剪掉指向已关闭标签的历史站，返回后 navIndex 仍指向当前站 */
+  private pruneNav(): void {
+    if (this.navStack.length === 0) {
+      this.navIndex = -1
+      return
+    }
+    const alive = new Set(this.tabs.map((tab) => tab.id))
+    const current = this.navStack[this.navIndex]
+    const kept = this.navStack.filter((point) => alive.has(point.id))
+    const index = current ? kept.indexOf(current) : -1
+    this.navStack = kept
+    this.navIndex = kept.length === 0 ? -1 : index >= 0 ? index : Math.min(this.navIndex, kept.length - 1)
+  }
+
+  private navGo(step: 1 | -1): void {
+    this.pruneNav()
+    const point = this.navStack[this.navIndex + step]
+    if (!point) return
+    const tab = this.tabs.find((item) => item.id === point.id)
+    if (!tab) return
+    this.navIndex += step
+    this.activate(tab.id)
+    tab.editor.selectRange(point.pos)
+  }
+
+  navBack(): void {
+    this.navGo(-1)
+  }
+
+  navForward(): void {
+    this.navGo(1)
+  }
+
+  canNavBack(): boolean {
+    this.pruneNav()
+    return this.navIndex > 0
+  }
+
+  canNavForward(): boolean {
+    this.pruneNav()
+    return this.navIndex >= 0 && this.navIndex < this.navStack.length - 1
   }
 
   sidebarVisible(): boolean {
@@ -884,6 +1218,7 @@ export class Workspace {
     tab.state = fromSnapshot(snapshot)
     tab.suspended = false
     void window.mdforge.draftClear([tab.key])
+    if (tab.active) void this.runCheck(false)
     this.refreshChrome()
   }
 
@@ -1093,6 +1428,9 @@ export class Workspace {
     this.lastMessage = message ?? `已保存：${snapshot.path}`
     this.revealTarget = reveal ? snapshot.path : null
     void window.mdforge.draftClear([previousKey, tab.key])
+    // 盘上内容变了：链接索引要重扫，检查里的磁盘类问题也重新核对
+    this.linkIndex = null
+    if (tab.active) void this.runCheck(false)
     this.schedulePersist()
   }
 
@@ -1102,8 +1440,19 @@ export class Workspace {
   }
 
   private routeLink(target: LinkTarget): void {
-    if (target.kind === 'external' && target.url) void window.mdforge.openExternal(target.url)
-    else if (target.kind === 'relative-md' && target.localPath) void this.openPath(target.localPath)
+    if (target.kind === 'external' && target.url) {
+      void window.mdforge.openExternal(target.url)
+      return
+    }
+    if (target.kind === 'anchor' && target.url !== '') {
+      // 文内锚点也要记导航：Alt+← 能回到跳转前的位置
+      const tab = this.active()
+      if (!tab) return
+      this.noteNavPoint()
+      if (!tab.editor.jumpToAnchor(target.url)) this.setMessage(`文内没有 #${target.url} 这个锚点`)
+      return
+    }
+    if (target.kind === 'relative-md' && target.localPath) void this.openPath(target.localPath)
   }
 
   private notify(error: FileErrorInfo): void {
@@ -1175,11 +1524,22 @@ export class Workspace {
 
   // ---- 文档检查 ----
 
-  private async runCheck(): Promise<void> {
+  /** 正文停下后自动重跑：内联标记与检查面板都能跟上改动 */
+  private scheduleLint(): void {
+    if (this.lintTimer !== undefined) window.clearTimeout(this.lintTimer)
+    this.lintTimer = window.setTimeout(() => void this.runCheck(false), LINT_DELAY_MS)
+  }
+
+  /** manual=true 时面板闪"正在检查"；自动检查静默更新标记与结果 */
+  private async runCheck(manual = true): Promise<void> {
     const tab = this.active()
     if (!tab) return
+    if (!manual && tab.editor.composing()) {
+      this.scheduleLint()
+      return
+    }
     const seq = ++this.checkSeq
-    this.side_.showRunning()
+    if (manual) this.side_.showRunning()
 
     const docPath = tab.state.path ?? ''
     const source = {
@@ -1197,6 +1557,9 @@ export class Workspace {
     try {
       const report = await inspectDocument(tab.editor.state(), docPath, source)
       if (seq !== this.checkSeq) return
+      // 检查期间标签可能已被关掉，编辑器销毁后不能再画标记
+      if (!this.tabs.includes(tab)) return
+      tab.editor.setIssues(report.issues)
       this.side_.showReport(report)
     } catch (error) {
       if (seq !== this.checkSeq) return
@@ -1216,6 +1579,7 @@ export class Workspace {
       this.setMessage(`已在文件夹中显示：${issue.path}`)
       return
     }
+    this.noteNavPoint()
     tab.editor.jumpTo(issue.pos)
   }
 
@@ -1267,6 +1631,7 @@ export class Workspace {
       active,
       recents: this.recents,
       folder: this.folderRoot,
+      favorites: this.favorites,
       sidebar: this.sidebarOn,
       autoSave: this.autoSave,
       export: this.exportOptions,
@@ -1280,6 +1645,7 @@ export class Workspace {
   async init(): Promise<void> {
     const [startup, session] = await Promise.all([window.mdforge.startupPaths(), window.mdforge.sessionRead()])
     this.recents = session?.recents ?? []
+    this.favorites = session?.favorites ?? []
     this.autoSave = session?.autoSave ?? true
     this.exportOptions = { ...DEFAULT_EXPORT_OPTIONS, ...session?.export }
     this.zoomLevel = normalizeZoom(session?.zoom) ?? 1
@@ -1289,12 +1655,11 @@ export class Workspace {
     this.applyViewPrefs()
     this.renderAutoSaveButton()
 
-    // 文件页与会话里的文件夹：重启后面板直接能看（主进程已按会话重新授权）
+    // 文件树与会话里的文件夹：重启后直接能看（主进程已按会话重新授权）
     this.folderRoot = session?.folder ?? null
     this.sidebarOn = session?.sidebar ?? true
     this.applySidebar()
-    if (this.folderRoot === null) this.pushFolderView()
-    else void this.refreshFolder()
+    this.side_.setFolderRoot(this.folderRoot)
 
     const paths = startup.length > 0 ? startup : (session?.openDocs ?? [])
     for (const path of paths) {
@@ -1319,6 +1684,16 @@ function formatTime(millis: number): string {
   const date = new Date(millis)
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function baseNameOf(target: string): string {
+  const parts = target.split(/[\\/]/)
+  return parts[parts.length - 1] || target
+}
+
+function shorten(text: string, limit = 30): string {
+  const one = text.replace(/\s+/g, ' ').trim()
+  return one.length > limit ? `${one.slice(0, limit)}…` : one
 }
 
 function formatMetrics(info: ReturnType<MarkdownEditor['status']>): string {

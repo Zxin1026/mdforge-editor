@@ -346,7 +346,11 @@ if (existsSync(HANDBOOK)) {
 
   /* 顶栏换成菜单栏：按钮行不再存在，导出等动作从菜单进入 */
   const barButtons = await win2.$$eval('.mdf-menubar-button', (els) => els.map((el) => el.textContent))
-  check('菜单栏替换原按钮行', barButtons.join(',') === '文件,编辑,段落,格式,视图,主题,帮助', JSON.stringify(barButtons))
+  check(
+    '菜单栏替换原按钮行',
+    barButtons.join(',') === '文件,编辑,段落,格式,视图,导航,主题,帮助',
+    JSON.stringify(barButtons)
+  )
   await win2.click('.mdf-menubar-button[data-menu="file"]')
   await win2.waitForSelector('.mdf-menu--bar')
   const fileMenu = await menuLabels(win2)
@@ -418,7 +422,7 @@ await win3.keyboard.press('Escape')
 await win3.waitForTimeout(150)
 check('Esc 收起右键菜单', (await win3.locator('.mdf-menu[data-context="1"]').count()) === 0)
 
-/* 视图设置：字号与编辑区宽度即时生效，并能还原 */
+/* 视图设置：字号与编辑区宽度即时生效，勾选也要在同一份菜单里跟着走 */
 async function pickViewItem(submenu, item) {
   await win3.click('.mdf-menubar-button[data-menu="view"]')
   await win3.waitForSelector('.mdf-menu--bar')
@@ -426,17 +430,27 @@ async function pickViewItem(submenu, item) {
   await win3.waitForTimeout(200)
   await win3.locator(`.mdf-menu--sub .mdf-menu-item[data-menu-label="${item}"]`).click()
   await win3.waitForTimeout(200)
+  const mark = await win3.evaluate((label) => {
+    const found = [...document.querySelectorAll('.mdf-menu--sub .mdf-menu-item')].find(
+      (el) => el.dataset.menuLabel === label
+    )
+    return found?.querySelector('.mdf-menu-mark')?.textContent ?? ''
+  }, item)
   await win3.keyboard.press('Escape')
   await win3.waitForTimeout(150)
+  return mark
 }
-await pickViewItem('字体大小', '大 (15 px)')
+const fontMark = await pickViewItem('字体大小', '大 (15 px)')
+check('字号菜单勾选即时更新', fontMark === '✓', fontMark)
 const fontNow = await win3.evaluate(() => getComputedStyle(document.querySelector('.cm-scroller')).fontSize)
 check('字号菜单立即生效', fontNow === '15px', fontNow)
-await pickViewItem('编辑区宽度', '中 (900 px)')
+const widthMark = await pickViewItem('编辑区宽度', '中 (900 px)')
+check('编辑区宽度勾选即时更新', widthMark === '✓', widthMark)
 const widthNow = await win3.evaluate(() => getComputedStyle(document.querySelector('.cm-content')).maxWidth)
 check('编辑区宽度菜单立即生效', widthNow === '900px', widthNow)
 await win3.screenshot({ path: path.join(root, 'verify', 'view-settings.png') })
-await pickViewItem('字体大小', '标准 (14 px)')
+const fontBackMark = await pickViewItem('字体大小', '标准 (14 px)')
+check('字号勾选能移回标准', fontBackMark === '✓', fontBackMark)
 await pickViewItem('编辑区宽度', '铺满')
 const widthBack = await win3.evaluate(() => getComputedStyle(document.querySelector('.cm-content')).maxWidth)
 check('编辑区宽度可还原为铺满', widthBack === 'none', widthBack)
@@ -745,6 +759,140 @@ await win7.waitForTimeout(300)
 const undoCell = await win7.evaluate(() => document.querySelector('.mdf-table-grid tbody td')?.textContent ?? '')
 check('撤销回退单元格修改', undoCell === '苹果', undoCell)
 await win7.screenshot({ path: path.join(root, 'verify', 'table-edit.png') })
+
+/* 粘贴一张 Markdown 表格（光标停在表格末尾）：网格常驻、单元格去掉标记；走进内部才切源码 */
+const PASTED_TABLE = [
+  '| 优先级 | 功能 | 价值 |',
+  '| --- | --- | --- |',
+  '| P0 | **工作区全文搜索与批量替换** | 目前 [folder.ts](E:/DATA_FILE/File/MDForge/mdforge-editor/src/main/fs/folder.ts) 只列出文件夹直接子级 |'
+].join('\n')
+await win7.locator('.cm-content').focus()
+await win7.keyboard.press('Control+End')
+await win7.waitForTimeout(150)
+await win7.evaluate((text) => {
+  const content = document.querySelector('.cm-content')
+  const data = new DataTransfer()
+  data.setData('text/plain', text)
+  content.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }))
+}, PASTED_TABLE)
+await win7.waitForTimeout(500)
+const pastedGrid = await win7.evaluate(() => {
+  const grids = [...document.querySelectorAll('.mdf-table-grid')]
+  const grid = grids[grids.length - 1]
+  if (!grid) return null
+  return {
+    count: grids.length,
+    rows: [...grid.querySelectorAll('tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent)),
+    strong: grid.querySelector('td .mdf-strong')?.textContent ?? null,
+    link: grid.querySelector('td .mdf-link')?.textContent ?? null,
+    text: grid.textContent
+  }
+})
+check(
+  '粘贴后光标停在表格末尾，网格保持显示',
+  pastedGrid !== null && pastedGrid.count === 2,
+  JSON.stringify({ count: pastedGrid?.count })
+)
+check(
+  '网格单元格去掉行内标记，链接只留文字',
+  pastedGrid?.rows[0]?.join('|') === 'P0|工作区全文搜索与批量替换|目前 folder.ts 只列出文件夹直接子级' &&
+    pastedGrid?.strong === '工作区全文搜索与批量替换' &&
+    pastedGrid?.link === 'folder.ts' &&
+    !String(pastedGrid?.text).includes('E:/DATA_FILE'),
+  JSON.stringify(pastedGrid?.rows?.[0])
+)
+await win7.screenshot({ path: path.join(root, 'verify', 'paste-table-grid.png') })
+
+await win7.keyboard.press('ArrowLeft')
+await win7.waitForTimeout(350)
+const pasteInside = await win7.evaluate(() => ({
+  grids: document.querySelectorAll('.mdf-table-grid').length,
+  text: document.querySelector('.cm-content').innerText
+}))
+check(
+  '光标走进表格内部仍切回源码',
+  pasteInside.grids === 1 && pasteInside.text.includes('E:/DATA_FILE'),
+  JSON.stringify({ grids: pasteInside.grids })
+)
+await win7.keyboard.press('ArrowRight')
+await win7.waitForTimeout(350)
+await win7.keyboard.press('Control+z')
+await win7.waitForTimeout(350)
+check(
+  '撤销后粘贴内容完全回退',
+  (await win7.evaluate(() => document.querySelector('.cm-content').innerText.includes('优先级'))) === false
+)
+
+/* 富文本粘贴：剪贴板带 HTML（聊天界面复制表格的样子）时转成 Markdown，Tab 版纯文本不再被照单全收 */
+const RICH_TAB_TEXT = [
+  '优先级\t功能\t价值\t实现难度',
+  'P0\t工作区全文搜索与批量替换\t当前查找主要针对当前文档\t中',
+  'P0\t递归文件树与文件操作\t目前 [folder.ts](E:/DATA_FILE/File/MDForge/mdforge-editor/src/main/fs/folder.ts) 只列出文件夹直接子级\t中'
+].join('\n')
+const RICH_HTML = [
+  '<p><span>从代码和 README 看，MDForge 的核心编辑体验已经比较完整。</span></p>',
+  '<div><table><thead><tr><th><span>优先级</span></th><th><span>功能</span></th><th><span>价值</span></th><th><span>实现难度</span></th></tr></thead><tbody>',
+  '<tr><td><span>P0</span></td><td><strong><span>工作区全文搜索与批量替换</span></strong></td><td><span>当前查找主要针对当前文档</span></td><td><span>中</span></td></tr>',
+  '<tr><td><span>P0</span></td><td><strong><span>递归文件树与文件操作</span></strong></td><td><span>目前 </span><span data-prompt-link-label="folder.ts" data-prompt-link-href="E:/DATA_FILE/File/MDForge/mdforge-editor/src/main/fs/folder.ts">[folder.ts](E:/DATA_FILE/File/MDForge/mdforge-editor/src/main/fs/folder.ts)</span><span> 只列出文件夹直接子级</span></td><td><span>中</span></td></tr>',
+  '</tbody></table></div>'
+].join('')
+await win7.locator('.cm-content').focus()
+await win7.keyboard.press('Control+End')
+await win7.waitForTimeout(150)
+await win7.evaluate(
+  ([text, html]) => {
+    const content = document.querySelector('.cm-content')
+    const data = new DataTransfer()
+    data.setData('text/plain', text)
+    data.setData('text/html', html)
+    content.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }))
+  },
+  [RICH_TAB_TEXT, RICH_HTML]
+)
+await win7.waitForTimeout(500)
+const richGrid = await win7.evaluate(() => {
+  const grids = [...document.querySelectorAll('.mdf-table-grid')]
+  const grid = grids[grids.length - 1]
+  if (!grid) return null
+  return {
+    count: grids.length,
+    head: [...grid.querySelectorAll('th')].map((el) => el.textContent),
+    rows: [...grid.querySelectorAll('tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent)),
+    link: grid.querySelector('td .mdf-link')?.textContent ?? null,
+    strong: grid.querySelector('td .mdf-strong')?.textContent ?? null,
+    text: grid.textContent,
+    docText: document.querySelector('.cm-content').innerText
+  }
+})
+check(
+  '带 HTML 的粘贴转成 Markdown 表格',
+  richGrid !== null &&
+    richGrid.count === 2 &&
+    richGrid.head?.join('|') === '优先级|功能|价值|实现难度' &&
+    richGrid.rows?.length === 2,
+  JSON.stringify({ count: richGrid?.count, head: richGrid?.head?.join('|') })
+)
+check(
+  'HTML 粘贴的单元格去标记，链接只留文字',
+  richGrid?.link === 'folder.ts' &&
+    richGrid?.strong === '工作区全文搜索与批量替换' &&
+    String(richGrid?.rows?.[1]?.[2] ?? '').includes('目前 folder.ts 只列出文件夹直接子级') &&
+    !String(richGrid?.text).includes('E:/DATA_FILE') &&
+    !String(richGrid?.text).includes('**'),
+  JSON.stringify({ link: richGrid?.link, cell: richGrid?.rows?.[1]?.[2]?.slice(0, 30) })
+)
+check(
+  'HTML 粘贴保留表格前的段落',
+  String(richGrid?.docText).includes('从代码和 README 看'),
+  String(richGrid?.docText).slice(0, 30)
+)
+await win7.screenshot({ path: path.join(root, 'verify', 'rich-paste.png') })
+await win7.keyboard.press('Control+z')
+await win7.waitForTimeout(350)
+check(
+  '撤销后富文本粘贴完全回退',
+  (await win7.evaluate(() => document.querySelector('.cm-content').innerText.includes('优先级'))) === false
+)
 
 await win7.waitForSelector('.mdf-preview-img', { timeout: 4000 })
 const natural = await win7.$eval('.mdf-preview-img', (el) => el.naturalWidth)
@@ -1501,18 +1649,60 @@ if ((await win13.textContent('#btn-autosave')).includes('开')) {
 
 await win13.locator('.cm-line').first().click()
 await win13.keyboard.type('（改动）')
-await win13.waitForTimeout(500)
+await win13.waitForTimeout(300)
 check(
-  '正文改动后提示结果过期',
+  '正文改动后先提示结果过期',
   (await win13.textContent('.issues-note')).includes('建议重新检查'),
   await win13.textContent('.issues-note')
 )
+await win13.waitForTimeout(1500)
+check(
+  '停顿后自动重跑检查，过期提示消失',
+  !(await win13.textContent('.issues-note')).includes('建议重新检查'),
+  await win13.textContent('.issues-note')
+)
 
-/* 打开文件夹 → 文件页预览列表 → 视图侧边栏开关 */
+/* 打开文件夹 → 递归文件树 → 文件操作 → 检查器新规则 → 工作区搜索 → 反向链接/导航 → 视图侧边栏开关 */
 const folderFixture = path.join(workDir, '笔记文件夹')
-mkdirSync(folderFixture, { recursive: true })
+mkdirSync(path.join(folderFixture, '子目录'), { recursive: true })
+mkdirSync(path.join(folderFixture, 'assets'), { recursive: true })
+writeFileSync(path.join(folderFixture, 'assets', 'p1.png'), makePng(8, 8))
 writeFileSync(path.join(folderFixture, 'day01.md'), '# Day 1 命令行入门\n\n第一条笔记。\n', 'utf8')
-writeFileSync(path.join(folderFixture, 'day02.md'), '# Day 2 环境初始化\n\n第二条笔记。\n', 'utf8')
+writeFileSync(
+  path.join(folderFixture, 'day02.md'),
+  '# Day 2 环境初始化\n\n第二条笔记，引用了 [Day 1](day01.md)。\n',
+  'utf8'
+)
+writeFileSync(
+  path.join(folderFixture, 'day03.md'),
+  '# Day 3 常用命令\n\n从 [Day 1](day01.md) 继续。\n\n搜一下 checkout 这个词。\n',
+  'utf8'
+)
+writeFileSync(path.join(folderFixture, '子目录', 'inner.md'), '# 子目录笔记\n\n[回 day01](../day01.md)\n', 'utf8')
+/* 检查器新规则的靶子：重复标题、空图片描述、未闭合代码块、front matter 问题、超长行 */
+writeFileSync(
+  path.join(folderFixture, 'lint-问题.md'),
+  [
+    '---',
+    'title: A',
+    'title: B',
+    '这行不是键值',
+    '---',
+    '',
+    '# 重复标题',
+    '',
+    '## 重复标题',
+    '',
+    '![](assets/p1.png)',
+    '',
+    'x'.repeat(220),
+    '',
+    '```',
+    'const a = 1',
+    ''
+  ].join('\n'),
+  'utf8'
+)
 await app13.evaluate(({ dialog }, dir) => {
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dir] })
 }, folderFixture)
@@ -1523,13 +1713,13 @@ await win13.waitForSelector('.mdf-menu--bar')
 check('文件菜单有「打开文件夹…」', (await menuLabels(win13)).includes('打开文件夹…'), '')
 await win13.locator('.mdf-menu-item[data-menu-label="打开文件夹…"]').click()
 await win13.waitForSelector('.file-item', { timeout: 9000 })
-const fileItems = await win13.$$eval('.file-item', (els) =>
+const fileItems = await win13.$$eval('.file-item:not(.is-dir)', (els) =>
   els.map((el) => ({
     name: el.querySelector('.file-name')?.innerText ?? '',
     preview: el.querySelector('.file-preview')?.textContent ?? ''
   }))
 )
-check('文件页列出文件夹里的 md', fileItems.length === 2, JSON.stringify(fileItems))
+check('文件页列出文件夹里的 md', fileItems.length === 4, JSON.stringify(fileItems))
 check(
   '列表按名称排序并带首行预览',
   fileItems[0]?.name.includes('day01.md') &&
@@ -1539,22 +1729,245 @@ check(
   JSON.stringify(fileItems)
 )
 check(
+  '目录条目排在文件前面',
+  await win13.evaluate(() => {
+    const first = document.querySelector('.file-item')
+    return (
+      first?.classList.contains('is-dir') === true &&
+      [...document.querySelectorAll('.file-item.is-dir .file-stem')].some((el) => el.textContent === '子目录')
+    )
+  }),
+  ''
+)
+check(
   '打开文件夹后自动切到文件页',
   await win13.evaluate(
     () => document.querySelector('.side-tab[data-side-tab="files"]')?.classList.contains('is-active') === true
   )
 )
 
-await win13.locator('.file-item').first().click()
+/* 递归文件树：展开子目录看到嵌套文件、新建文件夹、重命名 */
+await win13.locator('.file-item.is-dir[data-file-path$="子目录"]').click()
 await win13.waitForTimeout(500)
-check('点列表项在标签里打开', (await win13.textContent('#file-name')).includes('day01.md'), await win13.textContent('#file-name'))
+const expandedFiles = await win13.$$eval('.file-item:not(.is-dir)', (els) => els.map((el) => el.dataset.filePath ?? ''))
+check(
+  '展开子目录后看到嵌套的 md',
+  expandedFiles.some((p) => p.endsWith('inner.md')),
+  JSON.stringify(expandedFiles)
+)
+await win13.click('.files-tool[data-tool="new-folder"]')
+await win13.waitForSelector('.file-rename-input')
+await win13.locator('.file-rename-input').fill('新建目录')
+await win13.keyboard.press('Enter')
+await win13.waitForTimeout(700)
+check('工具按钮能新建文件夹', (await win13.locator('.file-item.is-dir[data-file-path$="新建目录"]').count()) === 1, '')
+await win13.locator('.file-item[data-file-path$="day03.md"]').click({ button: 'right' })
+await win13.waitForSelector('.mdf-menu [data-menu-label="重命名"]')
+await win13.locator('.mdf-menu [data-menu-label="重命名"]').click()
+await win13.waitForSelector('.file-rename-input')
+await win13.locator('.file-rename-input').fill('day03-改名.md')
+await win13.keyboard.press('Enter')
+await win13.waitForTimeout(700)
+check(
+  '重命名后文件树显示新名字',
+  (await win13.locator('.file-item[data-file-path$="day03-改名.md"]').count()) === 1 &&
+    (await win13.locator('.file-item[data-file-path$="day03.md"]').count()) === 0,
+  ''
+)
+
+/* 检查器新规则与编辑器内联标记：打开带问题的文档跑一次文档检查 */
+await win13.locator('.file-item[data-file-path$="lint-问题.md"]').click()
+await win13.waitForTimeout(600)
+await win13.click('.mdf-menubar-button[data-menu="view"]')
+await win13.waitForSelector('.mdf-menu--bar')
+await win13.locator('.mdf-menu-item[data-menu-label="文档检查"]').click()
+await win13.waitForSelector('.issue-item', { timeout: 9000 })
+const lintHeads = await win13.$$eval('.issue-group-head', (els) => els.map((el) => el.textContent))
+check(
+  '检查器新规则按类别分组',
+  lintHeads.some((text) => text.includes('重复标题 1')) &&
+    lintHeads.some((text) => text.includes('空图片描述 1')) &&
+    lintHeads.some((text) => text.includes('未闭合代码块 1')) &&
+    lintHeads.some((text) => text.includes('Front Matter 问题 2')) &&
+    lintHeads.some((text) => text.includes('超长行 1')),
+  JSON.stringify(lintHeads)
+)
+/* 行内标记只看当前显示的编辑器：隐藏标签的 cm-line 也在 DOM 里 */
+const readActiveMarks = () =>
+  win13.evaluate(() => {
+    const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+    return shown ? shown.querySelectorAll('.cm-line.mdf-issue-line').length : 0
+  })
+const markLines = await until(readActiveMarks, (count) => count >= 6)
+check('编辑器里出现行内问题标记', markLines >= 6, `marks=${markLines}`)
+await win13.screenshot({ path: path.join(root, 'verify', 'issues-inline.png') })
+await win13.locator('.tab-close').last().click()
+await win13.waitForTimeout(400)
+
+/* 检查面板切走过 files 视图，切回来再点文件 */
+await win13.click('.side-tab[data-side-tab="files"]')
+await win13.waitForSelector('.file-item[data-file-path$="day01.md"]', { timeout: 9000 })
+
+await win13.locator('.file-item[data-file-path$="day01.md"]').click()
+await win13.waitForTimeout(500)
+check(
+  '点列表项在标签里打开',
+  (await win13.textContent('#file-name')).includes('day01.md'),
+  await win13.textContent('#file-name')
+)
 check(
   '当前文件在列表里高亮',
   (await win13.$$eval('.file-item.is-active', (els) => els.map((el) => el.dataset.filePath))).some((p) =>
     p?.endsWith('day01.md')
   )
 )
+
+/* 收藏：点星后进入收藏区，再点一次取消 */
+await win13.locator('.file-item[data-file-path$="day02.md"] .file-star').click()
+await win13.waitForTimeout(350)
+check(
+  '收藏后出现在收藏区且星标点亮',
+  (await win13.locator('.files-favs .files-fav').count()) === 1 &&
+    (await win13.locator('.file-item[data-file-path$="day02.md"] .file-star.is-on').count()) === 1,
+  ''
+)
+await win13.locator('.files-favs .files-fav .file-star').click()
+await win13.waitForTimeout(350)
+check('取消收藏后收藏区清空', (await win13.locator('.files-favs .files-fav').count()) === 0, '')
 await win13.screenshot({ path: path.join(root, 'verify', 'files-panel.png') })
+
+/* 反向链接 → 文档关系图 → 导航历史 */
+await win13.click('.side-tab[data-side-tab="links"]')
+await win13.waitForTimeout(700)
+const backLinks = await win13.$$eval('.link-item', (els) =>
+  els.map((el) => ({
+    name: el.querySelector('.link-name')?.textContent ?? '',
+    detail: el.querySelector('.link-detail')?.textContent ?? ''
+  }))
+)
+check(
+  '反向链接列出指向当前文档的文档',
+  backLinks.some((link) => link.name.includes('day02.md') && link.detail.includes('第 3 行')),
+  JSON.stringify(backLinks)
+)
+await win13.locator('.link-item').first().click()
+await win13.waitForTimeout(500)
+check(
+  '点反向链接打开来源文档',
+  (await win13.textContent('#file-name')).includes('day02.md'),
+  await win13.textContent('#file-name')
+)
+check(
+  '点反向链接跳到链接所在行',
+  (await win13.textContent('#status-metrics')).includes('行 3'),
+  await win13.textContent('#status-metrics')
+)
+await win13.keyboard.press('Alt+ArrowLeft')
+await win13.waitForTimeout(450)
+check(
+  'Alt+← 后退到上一个位置',
+  (await win13.textContent('#file-name')).includes('day01.md'),
+  await win13.textContent('#file-name')
+)
+await win13.keyboard.press('Alt+ArrowRight')
+await win13.waitForTimeout(450)
+check(
+  'Alt+→ 前进回后一个位置',
+  (await win13.textContent('#file-name')).includes('day02.md'),
+  await win13.textContent('#file-name')
+)
+
+await win13.click('.mdf-menubar-button[data-menu="nav"]')
+await win13.waitForSelector('.mdf-menu--bar')
+const navLabels = await menuLabels(win13)
+check(
+  '导航菜单列出后退/前进/关系图',
+  navLabels.includes('后退') && navLabels.includes('前进') && navLabels.includes('文档关系图…'),
+  JSON.stringify(navLabels)
+)
+check(
+  '导航菜单里后退可用',
+  await win13.evaluate(
+    () => document.querySelector('.mdf-menu-item[data-menu-label="后退"]')?.classList.contains('is-disabled') === false
+  ),
+  ''
+)
+await ensureMenuClosed()
+
+await win13.locator('.side-tab[data-side-tab="links"]').click()
+await win13.waitForTimeout(400)
+await win13.click('.issues-run[data-action="links-graph"]')
+await win13.waitForSelector('.mdf-graph-node', { timeout: 9000 })
+const graphNodes = await win13.locator('.mdf-graph-node').count()
+const graphEdges = await win13.locator('.mdf-graph-edge').count()
+check('关系图画出全部文档与链接', graphNodes === 5 && graphEdges === 3, `nodes=${graphNodes} edges=${graphEdges}`)
+await win13.screenshot({ path: path.join(root, 'verify', 'graph.png') })
+await win13.keyboard.press('Escape')
+await win13.waitForTimeout(300)
+check('Esc 关闭关系图', (await win13.locator('.mdf-graph').count()) === 0, '')
+
+/* 关掉 day02 标签，回到 day01 继续测搜索 */
+await win13.locator('.tab-close').last().click()
+await win13.waitForTimeout(400)
+
+/* 工作区搜索与批量替换 */
+await win13.click('.side-tab[data-side-tab="search"]')
+await win13.waitForSelector('.search-input')
+await win13.locator('.search-input').first().fill('笔记')
+await win13.keyboard.press('Enter')
+await win13.waitForSelector('.search-hit', { timeout: 9000 })
+check(
+  '工作区搜索列出内容命中',
+  (await win13.locator('.search-hit').count()) === 3,
+  `${await win13.locator('.search-hit').count()} 处`
+)
+check(
+  '命中行带高亮片段',
+  (await win13.locator('.search-hit mark').count()) >= 3,
+  `${await win13.locator('.search-hit mark').count()} 处`
+)
+await win13.locator('.search-hit').first().click()
+await win13.waitForTimeout(450)
+check(
+  '点命中跳到命中行',
+  (await win13.textContent('#file-name')).includes('day01.md') &&
+    (await win13.textContent('#status-metrics')).includes('行 3'),
+  await win13.textContent('#status-metrics')
+)
+
+await win13.locator('.search-input').first().fill('day0')
+await win13.keyboard.press('Enter')
+await win13.waitForTimeout(700)
+check(
+  '文件名命中也列出',
+  (await win13.locator('.search-name-hit').count()) === 3,
+  `${await win13.locator('.search-name-hit').count()} 个`
+)
+
+await win13.locator('.search-input').first().fill('第一条笔记')
+await win13.keyboard.press('Enter')
+await win13.waitForSelector('.search-hit', { timeout: 9000 })
+await win13.locator('.search-input').nth(1).fill('第一条笔记（已更新）')
+await win13.click('.search-go[data-action="search-replace-all"]')
+await win13.waitForSelector('.mdf-dialog')
+await answer(win13, '替换')
+await win13.waitForTimeout(900)
+check(
+  '批量替换写回磁盘',
+  (readSafe(path.join(folderFixture, 'day01.md')) ?? '').includes('第一条笔记（已更新）'),
+  readSafe(path.join(folderFixture, 'day01.md')) ?? 'null'
+)
+check(
+  '替换后打开的干净标签跟着重载',
+  await win13.evaluate(() => {
+    const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+    return shown ? shown.querySelector('.cm-content')?.innerText.includes('第一条笔记（已更新）') === true : false
+  }),
+  ''
+)
+check('状态栏报告替换结果', (await statusText13()).includes('替换 1 处'), await statusText13())
+await win13.screenshot({ path: path.join(root, 'verify', 'workspace-search.png') })
+
 await win13.locator('.tab-close').nth(1).click()
 await win13.waitForTimeout(300)
 

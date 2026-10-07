@@ -167,7 +167,8 @@ function sameMeta(a: FileMeta, b: FileMeta): boolean {
   return a.encoding === b.encoding && a.eol === b.eol && a.bom === b.bom && a.eolMixed === b.eolMixed
 }
 
-async function writeFileAtomic(absolute: string, buffer: Buffer): Promise<void> {
+/** 原子写：先写同目录临时文件再改名，避免半截文件；搜索替换也复用这条路径 */
+export async function writeFileAtomic(absolute: string, buffer: Buffer): Promise<void> {
   const temp = path.join(path.dirname(absolute), `.${path.basename(absolute)}.${process.pid}.${Date.now()}.mdforge-tmp`)
   try {
     await fs.writeFile(temp, buffer)

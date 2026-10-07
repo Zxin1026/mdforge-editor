@@ -2,6 +2,7 @@ import { deleteLine, moveLineDown, moveLineUp, redo, redoDepth, selectAll, undo,
 import { findNext, findPrevious, openSearchPanel, replaceAll } from '@codemirror/search'
 import type { EditorView } from '@codemirror/view'
 import { boldCmd, headingCmd, inlineCodeCmd, italicCmd, listCmd, quoteCmd, strikeCmd, tableCmd } from './commands'
+import { htmlToMarkdown } from './rich-paste'
 
 /**
  * 菜单要触发的编辑器动作。键盘快捷键仍走各自的 keymap，
@@ -86,9 +87,11 @@ const runners: Record<EditorAction, (view: EditorView) => boolean> = {
     return true
   },
   paste: (view) => {
-    void window.mdforge.clipboardReadText().then((text) => {
-      if (text === '') return
-      dispatchWhenAlive(view, () => view.state.replaceSelection(text))
+    // 与编辑器里的 Ctrl+V 同一条路子：有 HTML 就先转 Markdown，没有才用纯文本
+    void Promise.all([window.mdforge.clipboardReadHtml(), window.mdforge.clipboardReadText()]).then(([html, text]) => {
+      const insert = (html.trim() === '' ? null : htmlToMarkdown(html)) ?? text
+      if (insert === '') return
+      dispatchWhenAlive(view, () => view.state.replaceSelection(insert))
     })
     return true
   },

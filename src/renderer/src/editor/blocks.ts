@@ -1,5 +1,6 @@
 import { EditorView, WidgetType } from '@codemirror/view'
 import katex from 'katex'
+import { renderCellInline } from './cell-inline'
 import { setFrontMatterCollapsed } from './frontmatter'
 import { openLightbox } from './lightbox'
 import { renderMermaid } from './mermaid'
@@ -240,7 +241,7 @@ function buildTable(model: TableModel): HTMLElement {
   const head = table.createTHead().insertRow()
   model.header.forEach((cell, col) => {
     const th = document.createElement('th')
-    th.textContent = cell
+    renderCellInline(th, cell)
     th.dataset.row = '-1'
     th.dataset.col = String(col)
     head.appendChild(th)
@@ -251,7 +252,7 @@ function buildTable(model: TableModel): HTMLElement {
     const tr = body.insertRow()
     for (const [col, cell] of row.entries()) {
       const td = document.createElement('td')
-      td.textContent = cell
+      renderCellInline(td, cell)
       td.dataset.row = String(index)
       td.dataset.col = String(col)
       const align = ALIGN_STYLE[model.aligns[col] ?? '']

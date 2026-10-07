@@ -281,6 +281,16 @@ describe('mermaid 与表格预览', () => {
     expect(ranges.some((range) => range.cls === 'mdf-pipe')).toBe(true)
   })
 
+  it('光标停在表格首/尾边界时不切源码（刚粘贴完的位置）', () => {
+    // 无结尾换行：表格尾边界就是文末，粘贴完光标正落在这里
+    const doc = '| A | B |\n| - | - |\n| 1 | 2 |'
+    const gridAt = (pos: number): boolean =>
+      collectMarks(stateWith(doc), [{ from: pos, to: pos }]).some((range) => range.widget === 'table')
+    expect(gridAt(0)).toBe(true)
+    expect(gridAt(doc.length)).toBe(true)
+    expect(gridAt(2)).toBe(false)
+  })
+
   it('表头列数与分隔行不匹配的伪表格不产出网格', () => {
     const ranges = collectMarks(stateWith('| A | B |\n| 1 | 2 |\n'), AWAY)
     expect(ranges.some((range) => range.widget === 'table')).toBe(false)

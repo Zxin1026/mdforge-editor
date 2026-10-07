@@ -36,6 +36,14 @@ export interface AppMenuContext {
   sidebar(): boolean
   toggleSidebar(): void
   inspect(): void
+  workspaceSearch(): void
+  navBack(): void
+  navForward(): void
+  canNavBack(): boolean
+  canNavForward(): boolean
+  /** 导航 → 反向链接：切到链接页 */
+  backlinks(): void
+  openGraph(): void
   zoom(): number
   zoomIn(): void
   zoomOut(): void
@@ -71,7 +79,8 @@ const WIDTH_LABELS: Record<ContentWidth, string> = {
 const SHORTCUT_LINES = [
   '文件：Ctrl+N 新建 · Ctrl+O 打开 · Ctrl+S 保存 · Ctrl+Shift+S 另存为 · Ctrl+W 关闭标签页',
   '编辑：Ctrl+Z 撤销 · Ctrl+Y 重做 · Ctrl+X 剪切 · Ctrl+C 复制 · Ctrl+V 粘贴 · Ctrl+A 全选',
-  '查找：Ctrl+F 查找 · Ctrl+H 替换 · F3 下一个 · Shift+F3 上一个',
+  '查找：Ctrl+F 当前文档 · Ctrl+H 替换 · Ctrl+Shift+F 工作区搜索 · F3 下一个 · Shift+F3 上一个',
+  '导航：Alt+← 后退 · Alt+→ 前进',
   '格式：Ctrl+B 加粗 · Ctrl+I 斜体 · Ctrl+Shift+X 删除线 · Ctrl+` 行内代码',
   '段落：Ctrl+1…6 标题 · Ctrl+0 正文 · Ctrl+Shift+Q 引用 · Ctrl+Shift+L / O / T 列表 · Ctrl+Alt+T 表格',
   '视图：Ctrl+/ 源代码模式 · Ctrl+= 放大 · Ctrl+- 缩小 · Ctrl+Shift+0 实际大小 · F11 全屏 · F12 开发者工具',
@@ -158,6 +167,7 @@ function editMenu(ctx: AppMenuContext): MenuBarMenu {
         { divider: true, label: '' },
         { label: '查找', hint: 'Ctrl+F', run: () => ctx.runEditor('find') },
         { label: '替换', hint: 'Ctrl+H', run: () => ctx.runEditor('replace') },
+        { label: '在工作区中查找…', hint: 'Ctrl+Shift+F', run: () => ctx.workspaceSearch() },
         { label: '查找下一个', hint: 'F3', run: () => ctx.runEditor('findNext') },
         { label: '查找上一个', hint: 'Shift+F3', run: () => ctx.runEditor('findPrevious') },
         { label: '全部替换', run: () => ctx.runEditor('replaceAll') }
@@ -244,21 +254,24 @@ function viewMenu(ctx: AppMenuContext): MenuBarMenu {
         { divider: true, label: '' },
         {
           label: '字体大小',
-          children: FONT_SIZES.map((size) => ({
-            label: FONT_SIZE_LABELS[size],
-            checked: ctx.fontSize() === size,
-            keepOpen: true,
-            run: () => ctx.setFontSize(size)
-          }))
+          // 惰性求值：keepOpen 重绘时重新算 checked，勾选才能跟着走
+          children: () =>
+            FONT_SIZES.map((size) => ({
+              label: FONT_SIZE_LABELS[size],
+              checked: ctx.fontSize() === size,
+              keepOpen: true,
+              run: () => ctx.setFontSize(size)
+            }))
         },
         {
           label: '编辑区宽度',
-          children: CONTENT_WIDTHS.map((width) => ({
-            label: WIDTH_LABELS[width],
-            checked: ctx.contentWidth() === width,
-            keepOpen: true,
-            run: () => ctx.setContentWidth(width)
-          }))
+          children: () =>
+            CONTENT_WIDTHS.map((width) => ({
+              label: WIDTH_LABELS[width],
+              checked: ctx.contentWidth() === width,
+              keepOpen: true,
+              run: () => ctx.setContentWidth(width)
+            }))
         },
         { divider: true, label: '' },
         { label: '全屏', hint: 'F11', checked: ctx.fullScreen(), keepOpen: true, run: () => ctx.toggleFullScreen() },
@@ -272,6 +285,21 @@ function viewMenu(ctx: AppMenuContext): MenuBarMenu {
         { label: '开发者工具', hint: 'F12', run: () => ctx.openDevTools() }
       ]
     }
+  }
+}
+
+function navMenu(ctx: AppMenuContext): MenuBarMenu {
+  return {
+    key: 'nav',
+    label: '导航',
+    mnemonic: 'n',
+    build: () => [
+      { label: '后退', hint: 'Alt+←', disabled: !ctx.canNavBack(), run: () => ctx.navBack() },
+      { label: '前进', hint: 'Alt+→', disabled: !ctx.canNavForward(), run: () => ctx.navForward() },
+      { divider: true, label: '' },
+      { label: '反向链接', hint: '谁链接到当前文档', run: () => ctx.backlinks() },
+      { label: '文档关系图…', run: () => ctx.openGraph() }
+    ]
   }
 }
 
@@ -315,6 +343,7 @@ export function appMenus(ctx: AppMenuContext): MenuBarMenu[] {
     paragraphMenu(ctx),
     formatMenu(ctx),
     viewMenu(ctx),
+    navMenu(ctx),
     themeMenu(ctx),
     helpMenu(ctx)
   ]
@@ -340,6 +369,7 @@ export function contextMenuEntries(ctx: AppMenuContext): MenuEntry[] {
     { label: '插入表格', hint: 'Ctrl+Alt+T', run: () => ctx.runEditor('table') },
     { divider: true, label: '' },
     { label: '查找', hint: 'Ctrl+F', run: () => ctx.runEditor('find') },
-    { label: '替换', hint: 'Ctrl+H', run: () => ctx.runEditor('replace') }
+    { label: '替换', hint: 'Ctrl+H', run: () => ctx.runEditor('replace') },
+    { label: '在工作区中查找…', hint: 'Ctrl+Shift+F', run: () => ctx.workspaceSearch() }
   ]
 }

@@ -14,6 +14,8 @@ import {
   type ResourceProbeInput,
   type SessionData,
   type TextExportInput,
+  type WorkspaceReplaceInput,
+  type WorkspaceSearchInput,
   type WriteRequest
 } from '../shared/ipc'
 import { exportHtml, exportPdf, exportText } from './export'
@@ -25,7 +27,9 @@ import { probeResources } from './fs/resource-check'
 import { draftClear, draftList, draftWrite } from './fs/draft-store'
 import { readSession, writeSession } from './fs/session'
 import { onExternalChange, unwatchFile, watchFile } from './fs/watch'
-import { listFolder } from './fs/folder'
+import { createFolder, listFolder, movePath, renamePath } from './fs/folder'
+import { replaceWorkspace, searchWorkspace } from './fs/search'
+import { scanLinks } from './fs/link-index'
 import {
   grantFolder,
   grantPath,
@@ -140,6 +144,46 @@ function parseProbeInput(raw: unknown): ResourceProbeInput {
   return { docPath: input.docPath, refs }
 }
 
+/** 搜索参数：路径、内容与两个开关逐项校验 */
+function parseSearchInput(raw: unknown): WorkspaceSearchInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '搜索参数不合法')
+  const input = raw as Partial<WorkspaceSearchInput>
+  if (typeof input.dir !== 'string' || typeof input.query !== 'string') {
+    throw new FileOpError('invalid-path', '搜索参数不完整')
+  }
+  return {
+    dir: input.dir,
+    query: input.query,
+    caseSensitive: input.caseSensitive === true,
+    regex: input.regex === true
+  }
+}
+
+/** 替换参数：targets 只保留形状正确的条目，hash 对不上由替换逻辑跳过 */
+function parseReplaceInput(raw: unknown): WorkspaceReplaceInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '替换参数不合法')
+  const input = raw as Partial<WorkspaceReplaceInput>
+  if (typeof input.dir !== 'string' || typeof input.query !== 'string') {
+    throw new FileOpError('invalid-path', '替换参数不完整')
+  }
+  const targets = Array.isArray(input.targets)
+    ? input.targets
+        .filter(
+          (item): item is { path: string; hash: string } =>
+            item !== null && typeof item === 'object' && typeof item.path === 'string' && typeof item.hash === 'string'
+        )
+        .slice(0, 500)
+    : []
+  return {
+    dir: input.dir,
+    query: input.query,
+    caseSensitive: input.caseSensitive === true,
+    regex: input.regex === true,
+    replacement: typeof input.replacement === 'string' ? input.replacement : '',
+    targets
+  }
+}
+
 /** 草稿文本由渲染进程给出，落盘前限制体量并校验形状 */
 function parseDraft(raw: unknown): DocDraft | null {
   if (raw === null || typeof raw !== 'object') return null
@@ -220,6 +264,44 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
     guarded(() => {
       if (typeof target !== 'string' || !target) throw new FileOpError('invalid-path', '文件夹路径不合法')
       return listFolder(target)
+    })
+  )
+
+  ipcMain.handle(CHANNEL.createFolder, (_event, dir: unknown, name: unknown) =>
+    guarded(() => {
+      if (typeof dir !== 'string') throw new FileOpError('invalid-path', '文件夹路径不合法')
+      return createFolder(dir, typeof name === 'string' ? name : '')
+    })
+  )
+
+  ipcMain.handle(CHANNEL.renamePath, (_event, target: unknown, name: unknown) =>
+    guarded(() => {
+      if (typeof target !== 'string') throw new FileOpError('invalid-path', '路径不合法')
+      return renamePath(target, typeof name === 'string' ? name : '')
+    })
+  )
+
+  ipcMain.handle(CHANNEL.movePath, (_event, target: unknown, destDir: unknown) =>
+    guarded(() => {
+      if (typeof target !== 'string' || typeof destDir !== 'string') {
+        throw new FileOpError('invalid-path', '移动参数不合法')
+      }
+      return movePath(target, destDir)
+    })
+  )
+
+  ipcMain.handle(CHANNEL.searchWorkspace, (_event, raw: unknown) =>
+    guarded(() => searchWorkspace(parseSearchInput(raw)))
+  )
+
+  ipcMain.handle(CHANNEL.replaceWorkspace, (_event, raw: unknown) =>
+    guarded(() => replaceWorkspace(parseReplaceInput(raw)))
+  )
+
+  ipcMain.handle(CHANNEL.scanLinks, (_event, target: unknown) =>
+    guarded(() => {
+      if (typeof target !== 'string' || !target) throw new FileOpError('invalid-path', '文件夹路径不合法')
+      return scanLinks(target)
     })
   )
 

@@ -7,6 +7,21 @@ import { CHANNEL, normalizeZoom } from '../shared/ipc'
  */
 export function registerWindowHandlers(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(CHANNEL.clipboardRead, () => clipboard.readText())
+  // Electron 44 的 clipboard 换成了 W3C 风格的 MIME 接口（readText/read 都是异步、没有 readHTML）
+  ipcMain.handle(CHANNEL.clipboardReadHtml, async () => {
+    try {
+      for (const item of await clipboard.read()) {
+        const type = item.types.find((candidate) => candidate.toLowerCase() === 'text/html')
+        if (!type) continue
+        const value: unknown = await item.getType(type)
+        if (typeof value === 'string') return value
+        if (value instanceof Blob) return await value.text()
+      }
+    } catch {
+      return ''
+    }
+    return ''
+  })
 
   ipcMain.handle(CHANNEL.clipboardWrite, (_event, text: unknown) => {
     if (typeof text !== 'string' || text === '') return false

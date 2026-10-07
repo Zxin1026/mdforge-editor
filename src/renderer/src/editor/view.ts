@@ -10,9 +10,12 @@ import { compositionEvents, compositionField, markdownDecorations, themeChanged 
 import { docPathField, setDocPath } from './doc-path'
 import { frontMatterCollapsed } from './frontmatter'
 import { themeHighlight } from './highlight'
+import { issueMarkField, marksFromIssues, setIssueMarks } from './issue-marks'
+import type { Issue } from './inspect'
 import { hoverLabel, linkAt, type LinkTarget } from './links'
 import { markdownHighlight, markdownLanguageExtension } from './markdown'
 import { imagePaste } from './paste-image'
+import { richPaste } from './rich-paste'
 import { collectOutline } from './outline'
 import { computeStatus, type StatusInfo } from './status'
 import { editorFacts, runEditorAction, type EditorAction, type EditorFacts } from './actions'
@@ -25,8 +28,14 @@ export interface MarkdownEditor {
   docPath(): string
   jumpTo(pos: number): void
   jumpToAnchor(anchor: string): boolean
+  /** 光标位置（选区主端），导航历史记位置用 */
+  cursorPos(): number
+  /** 选中一段并滚动到可见：工作区搜索命中的定位口径 */
+  selectRange(from: number, to?: number): void
   cursorLine(): number
   status(): StatusInfo
+  /** 检查结果的内联标记（行底色 + 命中片段波浪线） */
+  setIssues(issues: readonly Issue[]): void
   /** 输入法还在合成中：此时正文只是半成品拼音，自动保存必须让路 */
   composing(): boolean
   focus(): void
@@ -73,7 +82,11 @@ export function createEditor(
     if (!(event.ctrlKey || event.metaKey)) return false
     const target = targetAt(event.clientX, event.clientY)
     if (!target) return false
-    if (target.kind === 'anchor') return jumpToAnchor(target.url)
+    // 锚点也交给工作区处理：那里要先记一个导航历史点再跳
+    if (target.kind === 'anchor') {
+      onLink(target)
+      return true
+    }
     if (!target.openable) return false
     onLink(target)
     return true
@@ -92,11 +105,14 @@ export function createEditor(
     compositionEvents,
     markdownLanguageExtension,
     renderMode.of(markdownDecorations),
+    issueMarkField,
     // 顺序要紧：markdown 限定样式先覆盖标题与链接的下划线，代码块交给主题高亮
     syntaxHighlighting(markdownHighlight),
     syntaxHighlighting(themeHighlight),
     search({ top: true }),
     imagePaste({ notify: onNotice }),
+    // 图片之后接管：带 HTML 的剪贴板先转成 Markdown，纯文本仍走默认行为
+    richPaste(),
     // markdown 命令在前：Enter 只在列表/引用里续写，其余交回默认换行
     keymap.of(markdownKeymap),
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab, ...searchKeymap]),
@@ -141,8 +157,19 @@ export function createEditor(
       view.focus()
     },
     jumpToAnchor: (anchor) => jumpToAnchor(anchor),
+    cursorPos: () => view.state.selection.main.head,
+    selectRange: (from, to) => {
+      const doc = view.state.doc
+      const anchor = Math.max(0, Math.min(from, doc.length))
+      const head = Math.max(anchor, Math.min(to ?? from, doc.length))
+      view.dispatch({ selection: { anchor, head }, scrollIntoView: true, userEvent: 'select' })
+      view.focus()
+    },
     cursorLine: () => view.state.doc.lineAt(view.state.selection.main.head).number,
     status: () => computeStatus(view.state),
+    setIssues: (issues) => {
+      view.dispatch({ effects: setIssueMarks.of(marksFromIssues(issues)) })
+    },
     composing: () => view.state.field(compositionField).composing,
     focus: () => view.focus(),
     run: (action) => runEditorAction(view, action),

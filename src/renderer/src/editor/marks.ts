@@ -182,7 +182,7 @@ export function collectMarks(state: EditorState, active: readonly ActiveRange[],
           // 行级类：mdmdt 皮肤靠它给整块代码铺底、做圆角（默认皮肤无样式，不影响现观感）
           eachLine(state, range, (line) => out.push({ type: 'line', ...line, cls: 'mdf-code-line' }))
         } else if (name === 'Table') {
-          pushTable(state, range, overlaps, out)
+          pushTable(state, range, active, out)
         } else if (content) {
           out.push({ type: 'mark', from: node.from, to: node.to, cls: content })
         } else if (mute) {
@@ -307,13 +307,11 @@ function pushMermaid(
   out.push({ type: 'widget', from: at, to: at, cls: 'mdf-mermaid', widget: 'mermaid', content: body, block: true })
 }
 
-function pushTable(
-  state: EditorState,
-  range: NodeRange,
-  overlaps: (from: number, to: number) => boolean,
-  out: MarkRange[]
-): void {
-  if (overlaps(range.from, range.to)) return
+function pushTable(state: EditorState, range: NodeRange, active: readonly ActiveRange[], out: MarkRange[]): void {
+  // 与图片预览同款严格判定：光标停在表格首/尾边界（例如刚粘贴完停在表格末尾）不算进入，
+  // 真正走进表格内部才整块切回源码——这是改结构/看源码的通道
+  const editing = active.some((picked) => picked.from < range.to && picked.to > range.from)
+  if (editing) return
   const body = state.sliceDoc(range.from, range.to)
   if (!parseTable(body)) return
   // replace 装饰整体顶掉源码：平时只看到网格；改内容点单元格就地编辑（blocks.ts / table-edit.ts）

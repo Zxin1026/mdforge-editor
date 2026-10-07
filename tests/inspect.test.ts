@@ -98,6 +98,71 @@ describe('未引用资源', () => {
   })
 })
 
+describe('新增规则', () => {
+  it('重复标题点名第二处并给出锚点形式', async () => {
+    const report = await inspectDocument(stateWith('# 用法\n\n## 用法\n\n### 用法\n'), DOC_PATH, sourceWith())
+    const dup = report.issues.filter((issue) => issue.kind === 'duplicate-heading')
+    expect(dup).toHaveLength(2)
+    expect(dup[0].line).toBe(3)
+    expect(dup[0].detail).toContain('#用法-1')
+    expect(dup[1].line).toBe(5)
+  })
+
+  it('空图片描述报出来，有描述不报', async () => {
+    const report = await inspectDocument(
+      stateWith('![](assets/a.png)\n\n![有描述](assets/a.png)\n'),
+      DOC_PATH,
+      sourceWith()
+    )
+    const empty = report.issues.filter((issue) => issue.kind === 'empty-image-alt')
+    expect(empty).toHaveLength(1)
+    expect(empty[0].line).toBe(1)
+    expect(empty[0].end).toBeGreaterThan(empty[0].pos)
+  })
+
+  it('未闭合代码块在开头处报错', async () => {
+    const report = await inspectDocument(stateWith('正文\n\n```js\nconst a = 1\n'), DOC_PATH, sourceWith())
+    const fences = report.issues.filter((issue) => issue.kind === 'unclosed-fence')
+    expect(fences).toHaveLength(1)
+    expect(fences[0].line).toBe(3)
+    expect(fences[0].detail).toContain('```')
+    const closed = await inspectDocument(stateWith('```js\nconst a = 1\n```\n'), DOC_PATH, sourceWith())
+    expect(closed.issues.filter((issue) => issue.kind === 'unclosed-fence')).toHaveLength(0)
+  })
+
+  it('front matter 没闭合与非法行都报出来', async () => {
+    const unclosed = await inspectDocument(stateWith('---\ntitle: 标题\n\n正文\n'), DOC_PATH, sourceWith())
+    expect(unclosed.issues.filter((issue) => issue.kind === 'invalid-frontmatter')).toHaveLength(1)
+    expect(unclosed.issues[0].label).toContain('结束标记')
+
+    const bad = await inspectDocument(
+      stateWith('---\ntitle: 标题\n就是一行裸文本\n---\n\n正文\n'),
+      DOC_PATH,
+      sourceWith()
+    )
+    const issues = bad.issues.filter((issue) => issue.kind === 'invalid-frontmatter')
+    expect(issues).toHaveLength(1)
+    expect(issues[0].line).toBe(3)
+    expect(issues[0].detail).toContain('键: 值')
+
+    const dup = await inspectDocument(stateWith('---\ntitle: A\ntitle: B\n---\n'), DOC_PATH, sourceWith())
+    expect(dup.issues.filter((issue) => issue.kind === 'invalid-frontmatter')[0].detail).toContain('重复')
+  })
+
+  it('超过 200 字符的行点名，代码块里跳过', async () => {
+    const long = 'x'.repeat(220)
+    const report = await inspectDocument(
+      stateWith(`短行\n\n${long}\n\n\`\`\`\n${long}\n\`\`\`\n`),
+      DOC_PATH,
+      sourceWith()
+    )
+    const lines = report.issues.filter((issue) => issue.kind === 'long-line')
+    expect(lines).toHaveLength(1)
+    expect(lines[0].line).toBe(3)
+    expect(lines[0].detail).toContain('220')
+  })
+})
+
 it('问题按类别再按行号排序', async () => {
   const doc = '# 一级\n\n### 三级\n\n![缺](assets/nope.png)\n\n[坏](gone.md)\n'
   const report = await inspectDocument(stateWith(doc), DOC_PATH, sourceWith())

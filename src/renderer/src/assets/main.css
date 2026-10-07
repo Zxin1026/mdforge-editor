@@ -16,6 +16,7 @@
   --mdf-accent-soft: rgba(62, 105, 215, 0.15);
   --mdf-accent-edge: rgba(62, 105, 215, 0.4);
   --mdf-error-soft: rgba(227, 15, 46, 0.15);
+  --mdf-warn-soft: rgba(245, 145, 2, 0.14);
   --mdf-shadow: rgba(27, 31, 35, 0.14);
   --mdf-shadow-soft: rgba(27, 31, 35, 0.12);
   --mdf-overlay: rgba(250, 250, 252, 0.78);
@@ -63,6 +64,7 @@ html[data-theme='dark'] {
   --mdf-accent-soft: rgba(62, 105, 215, 0.3);
   --mdf-accent-edge: rgba(62, 105, 215, 0.5);
   --mdf-error-soft: rgba(227, 15, 46, 0.3);
+  --mdf-warn-soft: rgba(245, 145, 2, 0.22);
   --mdf-shadow: rgba(0, 0, 0, 0.5);
   --mdf-shadow-soft: rgba(0, 0, 0, 0.4);
   --mdf-overlay: rgba(27, 27, 31, 0.78);
@@ -841,12 +843,16 @@ body {
   display: none;
 }
 
-/* 文件页：文件名 + 首行预览，当前文件描边高亮 */
+/* 文件树：目录可展开，文件带首行预览，当前文件描边高亮 */
 .files-note {
   padding: 0 8px;
   font-size: 12px;
   line-height: 1.6;
   color: var(--mdf-muted);
+}
+
+.files-note.is-child {
+  padding: 2px 8px;
 }
 
 .files-empty {
@@ -878,7 +884,100 @@ body {
   border-color: var(--mdf-accent);
 }
 
+/* 文件树表头：当前文件夹名 + 新建/刷新工具按钮 */
+.files-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px 6px;
+  padding: 3px 6px;
+  border: 1px dashed transparent;
+  border-radius: 6px;
+}
+
+.files-head.is-drop-root.is-drop {
+  border-color: var(--mdf-accent);
+  background: var(--mdf-accent-soft);
+}
+
+.files-root-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mdf-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.files-tool {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--mdf-muted);
+  background: var(--mdf-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.files-tool:hover {
+  color: var(--mdf-accent);
+  border-color: var(--mdf-accent);
+}
+
+/* 收藏区：星的开关 + 名字，排在最上面方便直接点开 */
+.files-favs {
+  margin: 0 2px 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--mdf-border);
+}
+
+.files-fav-head {
+  padding: 0 6px 2px;
+  font-size: 11px;
+  color: var(--mdf-muted);
+}
+
+.files-fav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 5px;
+}
+
+.files-fav:hover {
+  background: var(--mdf-bg);
+}
+
+.files-fav-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
 .file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.file-children {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -896,6 +995,7 @@ body {
   border: 1px solid transparent;
   border-radius: 6px;
   cursor: pointer;
+  outline: none;
 }
 
 .file-item:hover {
@@ -907,7 +1007,87 @@ body {
   border-color: var(--mdf-accent);
 }
 
+.file-item.is-drop {
+  background: var(--mdf-accent-soft);
+  border-color: var(--mdf-accent);
+}
+
+.file-item.is-dragging {
+  opacity: 0.5;
+}
+
+.file-row-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.file-chevron {
+  flex: none;
+  width: 12px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--mdf-muted);
+  text-align: center;
+}
+
+.file-item.is-dir .file-name {
+  color: var(--mdf-muted);
+}
+
+.file-item.is-dir.is-expanded .file-name {
+  color: var(--mdf-fg);
+}
+
+.file-item.is-dir .file-stem.is-dir-name {
+  font-weight: 600;
+}
+
+.file-star {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--mdf-faint);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.file-item:hover .file-star,
+.files-fav .file-star,
+.file-star.is-on {
+  opacity: 1;
+}
+
+.file-star:hover {
+  color: var(--mdf-md-warn);
+}
+
+.file-star.is-on {
+  color: var(--mdf-md-warn);
+}
+
+.file-rename-input {
+  width: 100%;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--mdf-fg);
+  background: var(--mdf-panel);
+  border: 1px solid var(--mdf-accent);
+  border-radius: 4px;
+  outline: none;
+}
+
 .file-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   font-size: 13px;
   color: var(--mdf-fg);
@@ -1513,4 +1693,408 @@ body {
   color: var(--mdf-error);
   background: var(--mdf-error-soft);
   border-color: var(--mdf-error);
+}
+
+/* ==========================================================================
+ * 工作区搜索、反向链接、内联检查标记与关系图（深浅主题共用变量）
+ * ========================================================================== */
+
+/* 搜索页：两行输入 + 结果列表 */
+.search-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.search-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  background: var(--mdf-panel);
+  border: 1px solid var(--mdf-border);
+  border-radius: 5px;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--mdf-accent);
+}
+
+.search-opt {
+  flex: none;
+  min-width: 24px;
+  padding: 3px 5px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--mdf-muted);
+  background: var(--mdf-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.search-opt.is-on {
+  color: var(--mdf-accent);
+  background: var(--mdf-accent-soft);
+  border-color: var(--mdf-accent);
+}
+
+.search-go {
+  flex: none;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  background: var(--mdf-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.search-go:hover:not(:disabled) {
+  color: var(--mdf-accent);
+  border-color: var(--mdf-accent);
+}
+
+.search-go:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.search-note {
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--mdf-muted);
+}
+
+.search-note.is-error {
+  color: var(--mdf-error);
+}
+
+.search-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 2px;
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-group-head {
+  padding: 0 2px;
+  font-size: 11px;
+  color: var(--mdf-muted);
+}
+
+.search-name-hit {
+  width: 100%;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.search-name-hit:hover {
+  background: var(--mdf-bg);
+  color: var(--mdf-accent);
+}
+
+.search-file {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.search-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  font: inherit;
+  color: var(--mdf-fg);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.search-file-head:hover {
+  color: var(--mdf-accent);
+}
+
+.search-file-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.search-file-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--mdf-muted);
+}
+
+.search-hit {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 6px 2px 14px;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.search-hit:hover {
+  background: var(--mdf-bg);
+}
+
+.search-hit-line {
+  flex: none;
+  min-width: 18px;
+  font-size: 11px;
+  color: var(--mdf-muted);
+  text-align: right;
+}
+
+.search-hit-text {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.search-hit-text mark {
+  color: inherit;
+  background: var(--mdf-match);
+  border-radius: 2px;
+}
+
+/* 反向链接页 */
+.links-summary {
+  font-size: 12px;
+  color: var(--mdf-muted);
+}
+
+.links-note {
+  padding: 2px 2px 6px;
+  font-size: 12px;
+  color: var(--mdf-muted);
+}
+
+.link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.link-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 5px 8px;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.link-item:hover {
+  background: var(--mdf-bg);
+  border-color: var(--mdf-border);
+}
+
+.link-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mdf-fg);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.link-detail {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--mdf-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 编辑器内联检查标记：行底色条 + 命中片段波浪线 */
+.cm-line.mdf-issue-line.is-error {
+  background: var(--mdf-error-soft);
+  box-shadow: inset 2px 0 0 var(--mdf-error);
+}
+
+.cm-line.mdf-issue-line.is-warning {
+  background: var(--mdf-warn-soft);
+  box-shadow: inset 2px 0 0 var(--mdf-md-warn);
+}
+
+.mdf-issue-mark.is-error {
+  text-decoration: underline wavy var(--mdf-error);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.mdf-issue-mark.is-warning {
+  text-decoration: underline wavy var(--mdf-md-warn);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* 文档关系图：浅色卡片 + SVG 画布 */
+.mdf-graph {
+  position: fixed;
+  inset: 0;
+  z-index: 2400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--mdf-overlay);
+}
+
+.mdf-graph-card {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  max-height: 100%;
+  padding: 12px 14px 10px;
+  background: var(--mdf-panel);
+  border: 1px solid var(--mdf-border);
+  border-radius: 8px;
+  box-shadow: 0 14px 40px var(--mdf-shadow);
+}
+
+.mdf-graph-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.mdf-graph-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--mdf-fg);
+}
+
+.mdf-graph-hint {
+  flex: 1;
+  font-size: 12px;
+  color: var(--mdf-muted);
+}
+
+.mdf-graph-close {
+  padding: 3px 12px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  background: var(--mdf-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.mdf-graph-close:hover {
+  color: var(--mdf-accent);
+  border-color: var(--mdf-accent);
+}
+
+.mdf-graph-svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.mdf-graph-edge {
+  stroke: var(--mdf-border);
+  stroke-width: 1.2;
+}
+
+.mdf-graph-node circle {
+  fill: var(--mdf-panel);
+  stroke: var(--mdf-muted);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+
+.mdf-graph-node:hover circle {
+  stroke: var(--mdf-accent);
+  fill: var(--mdf-accent-soft);
+}
+
+.mdf-graph-node text {
+  font-size: 11px;
+  fill: var(--mdf-muted);
+  pointer-events: none;
+  user-select: none;
+}
+
+.mdf-graph-node.is-current circle {
+  fill: var(--mdf-accent);
+  stroke: var(--mdf-accent);
+}
+
+.mdf-graph-node.is-current text {
+  fill: var(--mdf-accent);
+  font-weight: 600;
+}
+
+.mdf-graph-node.is-isolated circle {
+  fill: var(--mdf-bg);
+  stroke: var(--mdf-faint);
+}
+
+.mdf-graph-node.is-isolated text {
+  fill: var(--mdf-faint);
+}
+
+.mdf-graph-empty {
+  padding: 20px 10px 10px;
+  font-size: 13px;
+  color: var(--mdf-muted);
 }
