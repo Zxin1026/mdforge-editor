@@ -36,8 +36,9 @@ async function check(manual: boolean): Promise<UpdateCheckOutcome> {
   const current = app.getVersion()
   try {
     const result = await autoUpdater.checkForUpdates()
-    const next = result?.updateInfo.version
-    if (next === undefined) return { status: 'latest', version: current }
+    // "已是最新"时 checkForUpdates 也会返回结果对象，只看 isUpdateAvailable，不能按 null 判断
+    if (result === null || !result.isUpdateAvailable) return { status: 'latest', version: current }
+    const next = result.updateInfo.version
     pendingVersion = next
     if (manual || !prompted.has(next)) {
       prompted.add(next)
