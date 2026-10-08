@@ -39,7 +39,8 @@ import { probeResources } from './fs/resource-check'
 import { draftClear, draftList, draftWrite } from './fs/draft-store'
 import { readSession, writeSession } from './fs/session'
 import { onExternalChange, unwatchFile, watchFile } from './fs/watch'
-import { createFolder, listFolder, movePath, renamePath } from './fs/folder'
+import { createFile, createFolder, listFolder, movePath, renamePath } from './fs/folder'
+import { trashPath } from './fs/trash'
 import { replaceWorkspace, searchWorkspace } from './fs/search'
 import { scanLinks } from './fs/link-index'
 import {
@@ -153,7 +154,13 @@ function parseProbeInput(raw: unknown): ResourceProbeInput {
   const input = raw as Partial<ResourceProbeInput>
   if (typeof input.docPath !== 'string') throw new FileOpError('invalid-path', '检查参数不完整')
   const refs = Array.isArray(input.refs) ? input.refs.filter((ref): ref is string => typeof ref === 'string') : []
-  return { docPath: input.docPath, refs }
+  const anchors = Array.isArray(input.anchors)
+    ? input.anchors.filter(
+        (item): item is { path: string; anchor: string } =>
+          item !== null && typeof item === 'object' && typeof item.path === 'string' && typeof item.anchor === 'string'
+      )
+    : []
+  return { docPath: input.docPath, refs, anchors }
 }
 
 /** 搜索参数：路径、内容与两个开关逐项校验 */
@@ -388,6 +395,15 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
       return createFolder(dir, typeof name === 'string' ? name : '')
     })
   )
+
+  ipcMain.handle(CHANNEL.createFile, (_event, dir: unknown, name: unknown) =>
+    guarded(() => {
+      if (typeof dir !== 'string') throw new FileOpError('invalid-path', '文件夹路径不合法')
+      return createFile(dir, typeof name === 'string' ? name : '')
+    })
+  )
+
+  ipcMain.handle(CHANNEL.trashPath, (_event, target: unknown) => guarded(() => trashPath(target)))
 
   ipcMain.handle(CHANNEL.renamePath, (_event, target: unknown, name: unknown) =>
     guarded(() => {

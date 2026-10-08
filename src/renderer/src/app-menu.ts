@@ -452,6 +452,21 @@ function themeMenu(ctx: AppMenuContext): MenuBarMenu {
       { label: '深色', checked: ctx.theme() === 'dark', keepOpen: true, run: () => ctx.setTheme('dark') },
       { divider: true, label: '' },
       {
+        label: '护眼',
+        hint: '暖色纸感 · sepia',
+        checked: ctx.theme() === 'sepia',
+        keepOpen: true,
+        run: () => ctx.setTheme('sepia')
+      },
+      {
+        label: '高对比度',
+        hint: '黑底高反差',
+        checked: ctx.theme() === 'high-contrast',
+        keepOpen: true,
+        run: () => ctx.setTheme('high-contrast')
+      },
+      { divider: true, label: '' },
+      {
         label: '跟随系统',
         hint: '随系统深浅色切换',
         checked: ctx.theme() === 'system',

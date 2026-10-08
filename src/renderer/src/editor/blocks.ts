@@ -6,7 +6,7 @@ import { setFrontMatterCollapsed } from './frontmatter'
 import { openLightbox } from './lightbox'
 import { renderMermaid } from './mermaid'
 import { writeImageWidth } from './image-size'
-import { parseTable, type TableModel } from './table'
+import { addColumn, insertRow, parseTable, removeColumn, removeRow, type TableModel } from './table'
 import { openCellEditor } from './table-edit'
 import type { EditorTheme } from './theme-runtime'
 
@@ -209,10 +209,28 @@ export class TableGridWidget extends WidgetType {
       box.textContent = '表格格式无法解析'
       return box
     }
-    const table = buildTable(model)
+    const run = (name: TableOpName, row: number, col: number): void => {
+      // 阅读模式下按钮仍在 DOM 里（装饰不跟着重配重建），这里兜底挡住写入
+      if (view.state.readOnly) return
+      const next =
+        name === 'row-add'
+          ? insertRow(this.source, row)
+          : name === 'row-del'
+            ? removeRow(this.source, row)
+            : name === 'col-add'
+              ? addColumn(this.source, col)
+              : removeColumn(this.source, col)
+      if (next === null || next === this.source) return
+      // 输入期间文档可能被外部改动：区间对不上就放弃，避免写错位置（同单元格编辑）
+      if (view.state.sliceDoc(this.nodeFrom, this.nodeTo) !== this.source) return
+      view.dispatch({ changes: { from: this.nodeFrom, to: this.nodeTo, insert: next }, userEvent: 'input' })
+    }
+    const table = buildTable(model, run)
     // 点单元格就地编辑：widget 默认忽略内部事件，点击不会挪动 CodeMirror 的光标
     table.addEventListener('click', (event) => {
-      const cell = (event.target as HTMLElement | null)?.closest('th, td')
+      const target = event.target as HTMLElement | null
+      if (target?.closest('.mdf-table-btn')) return
+      const cell = target?.closest('th, td')
       if (!(cell instanceof HTMLElement)) return
       openCellEditor(view, cell, {
         source: this.source,
@@ -235,9 +253,44 @@ const ALIGN_STYLE: Record<string, string> = {
   right: 'right'
 }
 
-function buildTable(model: TableModel): HTMLElement {
+type TableOpName = 'row-add' | 'row-del' | 'col-add' | 'col-del'
+
+type TableOpRunner = (name: TableOpName, row: number, col: number) => void
+
+/*
+ * 按钮不带文字节点、符号由 CSS 伪元素画：单元格的 textContent 会被测试与
+ * 复制里当"内容"读，多出的 ＋－ 会污染它。无障碍信息走 aria-label / title。
+ */
+function tableOpsButton(name: TableOpName, title: string, danger: boolean, run: () => void): HTMLButtonElement {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = `mdf-table-btn${danger ? ' is-danger' : ''}`
+  button.dataset.op = name
+  button.title = title
+  button.setAttribute('aria-label', title)
+  button.tabIndex = -1
+  button.addEventListener('mousedown', (event) => event.preventDefault())
+  button.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    run()
+  })
+  return button
+}
+
+/** 行首的加/删行按钮组；放进行内第一格，靠 CSS 浮到表格左缘之外 */
+function rowOps(index: number, run: TableOpRunner, canRemove: boolean): HTMLElement {
+  const ops = document.createElement('div')
+  ops.className = 'mdf-row-ops'
+  ops.appendChild(tableOpsButton('row-add', '在下方插入行', false, () => run('row-add', index, 0)))
+  if (canRemove) ops.appendChild(tableOpsButton('row-del', '删除本行', true, () => run('row-del', index, 0)))
+  return ops
+}
+
+function buildTable(model: TableModel, run: TableOpRunner): HTMLElement {
   const table = document.createElement('table')
   table.className = 'mdf-table-grid'
+  const singleColumn = model.header.length <= 1
 
   const head = table.createTHead().insertRow()
   model.header.forEach((cell, col) => {
@@ -245,6 +298,16 @@ function buildTable(model: TableModel): HTMLElement {
     renderCellInline(th, cell)
     th.dataset.row = '-1'
     th.dataset.col = String(col)
+
+    const colOps = document.createElement('div')
+    colOps.className = 'mdf-col-ops'
+    colOps.appendChild(tableOpsButton('col-add', '在右侧插入列', false, () => run('col-add', -1, col)))
+    if (!singleColumn) {
+      colOps.appendChild(tableOpsButton('col-del', '删除本列', true, () => run('col-del', -1, col)))
+    }
+    th.appendChild(colOps)
+    // 表头行只给"加行"：表头本身不能删
+    if (col === 0) th.appendChild(rowOps(-1, run, false))
     head.appendChild(th)
   })
 
@@ -258,6 +321,7 @@ function buildTable(model: TableModel): HTMLElement {
       td.dataset.col = String(col)
       const align = ALIGN_STYLE[model.aligns[col] ?? '']
       if (align) td.style.textAlign = align
+      if (col === 0) td.appendChild(rowOps(index, run, true))
       tr.appendChild(td)
     }
   })

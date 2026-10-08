@@ -65,6 +65,53 @@ describe('锚点与标题层级', () => {
     expect(report.issues[0].line).toBe(5)
   })
 
+  it('跨文档锚点：目标文档里没有该标题才报，文件读不出来不报', async () => {
+    const source: InspectSource = {
+      probe: async (refs, anchors = []) => ({
+        states: refs.map(() => 'ok'),
+        assets: [],
+        anchorStates: anchors.map((item) => (item.anchor === '用法' ? 'ok' : 'unknown'))
+      })
+    }
+    const report = await inspectDocument(
+      stateWith('[对](other.md#用法)\n\n[读不出](gone.md#随便)\n'),
+      DOC_PATH,
+      source
+    )
+    expect(report.issues).toEqual([])
+  })
+
+  it('跨文档锚点缺失报坏链，锚点编码能还原', async () => {
+    const source: InspectSource = {
+      probe: async (refs, anchors = []) => ({
+        states: refs.map(() => 'ok'),
+        assets: [],
+        anchorStates: anchors.map((item) => (item.anchor === '用法' ? 'ok' : 'missing'))
+      })
+    }
+    const report = await inspectDocument(stateWith('[错](a.md#%E7%94%A8%E6%B3%95x)\n'), DOC_PATH, source)
+    expect(report.issues).toHaveLength(1)
+    expect(report.issues[0].kind).toBe('broken-link')
+    expect(report.issues[0].detail).toContain('#用法x')
+  })
+
+  it('指向自己的带锚点链接按内存大纲核对，不绕主进程', async () => {
+    let anchorChecks: ReadonlyArray<{ path: string; anchor: string }> = []
+    const source: InspectSource = {
+      probe: async (refs, anchors = []) => {
+        anchorChecks = anchors
+        return { states: refs.map(() => 'ok'), assets: [] }
+      }
+    }
+    const ok = await inspectDocument(stateWith('# 用法\n\n[对](README.md#用法)\n'), DOC_PATH, source)
+    expect(ok.issues).toEqual([])
+    expect(anchorChecks).toHaveLength(0)
+
+    const bad = await inspectDocument(stateWith('# 用法\n\n[错](README.md#没有)\n'), DOC_PATH, source)
+    expect(bad.issues).toHaveLength(1)
+    expect(bad.issues[0].detail).toContain('文内没有名为 #没有')
+  })
+
   it('标题跳级报一行，逐级往下不报', async () => {
     const report = await inspectDocument(stateWith('# 甲\n\n## 乙\n\n### 丙\n'), DOC_PATH, sourceWith())
     expect(report.issues).toEqual([])
@@ -147,6 +194,19 @@ describe('新增规则', () => {
 
     const dup = await inspectDocument(stateWith('---\ntitle: A\ntitle: B\n---\n'), DOC_PATH, sourceWith())
     expect(dup.issues.filter((issue) => issue.kind === 'invalid-frontmatter')[0].detail).toContain('重复')
+  })
+
+  it('TODO / FIXME / 待补充 占位符点名，小写 todo 不误报', async () => {
+    const report = await inspectDocument(
+      stateWith('正文\n\nTODO: 补图\n\nFIXME 这里要改\n\n待补充\n\n一个 todo 列表\n'),
+      DOC_PATH,
+      sourceWith()
+    )
+    const todos = report.issues.filter((issue) => issue.kind === 'todo-placeholder')
+    expect(todos.map((issue) => issue.line)).toEqual([3, 5, 7])
+    expect(todos[0].label).toContain('TODO')
+    expect(todos[0].pos).toBeGreaterThan(0)
+    expect(todos[0].end).toBeGreaterThan(todos[0].pos)
   })
 
   it('超过 200 字符的行点名，代码块里跳过', async () => {

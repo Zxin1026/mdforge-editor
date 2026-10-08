@@ -69,7 +69,7 @@ import type { MenuEntry, MenuHandle } from './menu'
 import { openMenu } from './menu'
 import { createSidePanel, type LinksView, type SidePanel } from './side-panel'
 import type { ReplaceRequest } from './side/search-view'
-import { inspectDocument, type Issue } from './editor/inspect'
+import { inspectDocument, type InspectSource, type Issue } from './editor/inspect'
 import { createSplitPreview, themeForApp, type SplitPreview } from './split-preview'
 import { currentTheme } from './editor/theme-runtime'
 import { createTabBar, type TabBar, type TabItem } from './tabs'
@@ -208,6 +208,8 @@ export class Workspace {
         },
         rename: (target, name) => this.renameEntry(target, name),
         createFolder: (dir, name) => this.createEntry(dir, name),
+        createFile: (dir, name) => this.createDocEntry(dir, name),
+        deleteEntry: (path, kind) => this.trashEntry(path, kind),
         move: (target, destDir) => this.moveEntry(target, destDir),
         favorites: () => this.favorites,
         toggleFavorite: (path) => this.toggleFavorite(path),
@@ -524,6 +526,64 @@ export class Workspace {
     this.linkIndex = null
     this.setMessage(`已新建文件夹：${baseNameOf(result.value)}`)
     return true
+  }
+
+  /** 新建 Markdown 文件：落盘后直接打开，接着就能写 */
+  private async createDocEntry(dir: string, name: string): Promise<boolean> {
+    const result = await window.mdforge.createFile(dir, name)
+    if (!result.ok) {
+      this.notify(result.error)
+      return false
+    }
+    this.linkIndex = null
+    this.linkIndexDir = null
+    this.setMessage(`已新建：${baseNameOf(result.value)}`)
+    await this.openPath(result.value)
+    return true
+  }
+
+  /** 删除条目（移入回收站）：确认 → 已打开的文档先关标签（取消可整体放弃）→ 主进程落回事 */
+  private async trashEntry(path: string, kind: 'file' | 'dir'): Promise<boolean> {
+    const name = baseNameOf(path)
+    const go = await askDialog<boolean>({
+      title: kind === 'dir' ? '删除文件夹？' : '删除文件？',
+      body: kind === 'dir' ? `“${name}” 和它里面的全部内容会一起移到系统回收站。` : `“${name}” 会被移到系统回收站。`,
+      note: '之后可以从回收站还原；还没保存的修改会先逐个询问。',
+      options: [
+        { label: '移入回收站', value: true, kind: 'danger' },
+        { label: '取消', value: false }
+      ],
+      cancelValue: false
+    })
+    if (!go) return false
+
+    const open = this.tabs.filter((tab) => this.underPath(tab.state.path, path))
+    for (const tab of open) {
+      if (!(await this.close(tab.id))) return false
+    }
+
+    const result = await window.mdforge.trashPath(path)
+    if (!result.ok) {
+      this.notify(result.error)
+      return false
+    }
+    this.recents = this.recents.filter((item) => !this.underPath(item, path))
+    this.favorites = this.favorites.filter((item) => !this.underPath(item, path))
+    this.linkIndex = null
+    this.linkIndexDir = null
+    this.side_.syncFavorites()
+    await this.side_.reloadFiles()
+    this.schedulePersist()
+    this.setMessage(`已移入回收站：${name}`)
+    return true
+  }
+
+  /** candidate 是否就是 target 或在 target 下（重命名/删除共用同一份前缀口径） */
+  private underPath(candidate: string | null, target: string): boolean {
+    if (candidate === null) return false
+    const key = candidate.toLowerCase()
+    const base = target.toLowerCase()
+    return key === base || key.startsWith(`${base}\\`) || key.startsWith(`${base}/`)
   }
 
   private async moveEntry(target: string, destDir: string): Promise<boolean> {
@@ -2019,15 +2079,15 @@ export class Workspace {
     if (manual) this.side_.showRunning()
 
     const docPath = tab.state.path ?? ''
-    const source = {
-      probe: async (refs: string[]) => {
+    const source: InspectSource = {
+      probe: async (refs, anchors) => {
         if (docPath === '') return { states: refs.map(() => 'unknown' as const), assets: [] }
-        const result = await window.mdforge.probeResources({ docPath, refs })
+        const result = await window.mdforge.probeResources({ docPath, refs, anchors: anchors ? [...anchors] : [] })
         if (!result.ok) {
           this.notify(result.error)
           return { states: refs.map(() => 'unknown' as const), assets: [] }
         }
-        return { states: result.value.states, assets: result.value.assets }
+        return { states: result.value.states, assets: result.value.assets, anchorStates: result.value.anchorStates }
       }
     }
 

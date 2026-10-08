@@ -1,7 +1,13 @@
+import {
+  autocompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  type CloseBracketConfig
+} from '@codemirror/autocomplete'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { syntaxHighlighting } from '@codemirror/language'
+import { codeFolding, foldGutter, foldKeymap, syntaxHighlighting } from '@codemirror/language'
 import { search, searchKeymap } from '@codemirror/search'
-import { Compartment, EditorState, Transaction, type Extension } from '@codemirror/state'
+import { Compartment, EditorState, Prec, Transaction, type Extension } from '@codemirror/state'
 import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import type { FileErrorInfo } from '../../../shared/ipc'
 import { createSlugger } from '../../../shared/slug'
@@ -133,6 +139,27 @@ const typewriterTheme = EditorView.theme({
   }
 })
 
+/** 括号配对：默认集合（( [ { 引号）补上反引号，行内代码离不开它 */
+const bracketPairing = EditorState.languageData.of(() => [
+  { closeBrackets: { brackets: ['(', '[', '{', "'", '"', '`'] } satisfies CloseBracketConfig }
+])
+
+/**
+ * 手打围栏守卫：closeBrackets 把反引号当引号配对，连敲三个会先补一对再补一对
+ * 变成四个。光标左侧已有反引号、右侧又没有配对留下的反引号时，直接落单字——
+ * 于是 ``` 就是三个，```` 就是四个，配对与收尾跳过仍交给 closeBrackets。
+ */
+const backtickGuard = Prec.high(
+  EditorView.inputHandler.of((view, from, to, insert) => {
+    if (insert !== '`' || from !== to || view.composing || view.state.readOnly) return false
+    const line = view.state.doc.lineAt(from)
+    if (!view.state.sliceDoc(line.from, from).endsWith('`')) return false
+    if (view.state.sliceDoc(from, from + 1) === '`') return false
+    view.dispatch({ changes: { from, insert: '`' }, selection: { anchor: from + 1 }, userEvent: 'input.type' })
+    return true
+  })
+)
+
 export function createEditor(
   mount: HTMLElement,
   onChange: (text: string) => void,
@@ -201,12 +228,20 @@ export function createEditor(
     syntaxHighlighting(markdownHighlight),
     syntaxHighlighting(themeHighlight),
     search({ top: true }),
+    // 折叠来自语言定义（markdown 的 Block 与标题 section），这里只挂开关与折叠槽
+    codeFolding(),
+    foldGutter(),
+    // 括号配对 + 补全：markdown 自带 HTML 标签补全，代码块内按 language-data 的语言补全
+    backtickGuard,
+    bracketPairing,
+    closeBrackets(),
+    autocompletion(),
     imagePaste({ notify: onNotice }),
     // 图片之后接管：带 HTML 的剪贴板先转成 Markdown，纯文本仍走默认行为
     richPaste(),
     // markdown 命令在前：Enter 只在列表/引用里续写，其余交回默认换行
     keymap.of(markdownKeymap),
-    keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab, ...searchKeymap]),
+    keymap.of([...defaultKeymap, ...historyKeymap, ...closeBracketsKeymap, ...foldKeymap, indentWithTab, ...searchKeymap]),
     EditorView.domEventHandlers({
       mousedown: (event) => openLink(event),
       mousemove: (event) => hover.move(event, targetAt),

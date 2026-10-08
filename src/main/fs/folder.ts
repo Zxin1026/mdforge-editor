@@ -86,8 +86,8 @@ async function requireFolderDir(target: unknown): Promise<string> {
   return absolute
 }
 
-/** 树操作的目标：必须是授权根下真实存在的文件或目录 */
-async function requireEntry(target: unknown): Promise<string> {
+/** 树操作的目标：必须是授权根下真实存在的文件或目录（删除/移动/重命名共用） */
+export async function requireEntry(target: unknown): Promise<string> {
   if (typeof target !== 'string' || !target || target.includes('\0')) {
     throw new FileOpError('invalid-path', '非法路径', { path: String(target) })
   }
@@ -135,6 +135,23 @@ export async function createFolder(dir: string, name: string): Promise<string> {
   }
   try {
     await fs.mkdir(target)
+  } catch (error) {
+    throw mapFsError(error, target)
+  }
+  return target
+}
+
+/** 新建 Markdown 文件：名称没带可打开的扩展名时补 .md */
+export async function createFile(dir: string, name: string): Promise<string> {
+  const parent = await requireFolderDir(dir)
+  const clean = validName(name)
+  const file = OPENABLE.has(path.extname(clean).toLowerCase()) ? clean : `${clean}.md`
+  const target = path.join(parent, file)
+  if (await exists(target)) {
+    throw new FileOpError('invalid-path', `这里已有同名条目：${file}`, { path: target })
+  }
+  try {
+    await fs.writeFile(target, '')
   } catch (error) {
     throw mapFsError(error, target)
   }

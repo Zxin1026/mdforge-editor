@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { normalizeTheme, normalizeZoom } from '../src/shared/ipc'
-import { resolveTheme } from '../src/renderer/src/theme'
+import { resolveTheme, themeFamily } from '../src/renderer/src/theme'
 
 describe('resolveTheme', () => {
   it('明确指定时按指定值', () => {
     expect(resolveTheme('light', true)).toBe('light')
     expect(resolveTheme('dark', false)).toBe('dark')
+    expect(resolveTheme('sepia', true)).toBe('sepia')
+    expect(resolveTheme('high-contrast', false)).toBe('high-contrast')
   })
 
   it('跟随系统时读系统深浅色', () => {
@@ -14,10 +16,21 @@ describe('resolveTheme', () => {
   })
 })
 
+describe('themeFamily', () => {
+  it('护眼属浅色族，高对比度属深色族', () => {
+    expect(themeFamily('light')).toBe('light')
+    expect(themeFamily('sepia')).toBe('light')
+    expect(themeFamily('dark')).toBe('dark')
+    expect(themeFamily('high-contrast')).toBe('dark')
+  })
+})
+
 describe('normalizeTheme', () => {
-  it('三个合法取值原样返回', () => {
+  it('五个合法取值原样返回', () => {
     expect(normalizeTheme('light')).toBe('light')
     expect(normalizeTheme('dark')).toBe('dark')
+    expect(normalizeTheme('sepia')).toBe('sepia')
+    expect(normalizeTheme('high-contrast')).toBe('high-contrast')
     expect(normalizeTheme('system')).toBe('system')
   })
 

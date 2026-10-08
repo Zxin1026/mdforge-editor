@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { EditorState } from '@codemirror/state'
+import { headingTitle } from '../src/shared/slug'
 import { markdownLanguageExtension } from '../src/renderer/src/editor/markdown'
 import {
   activeIndex,
   collectOutline,
-  headingTitle,
   outlineGuides,
   type OutlineItem
 } from '../src/renderer/src/editor/outline'

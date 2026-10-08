@@ -5,10 +5,10 @@ export type ChoosableEncoding = Exclude<MdEncoding, 'unknown'>
 
 export type Eol = 'crlf' | 'lf'
 
-/** 界面主题：浅色 / 深色 / 跟随系统（跟随系统由渲染进程读 prefers-color-scheme） */
-export type AppTheme = 'light' | 'dark' | 'system'
+/** 界面主题：浅色 / 深色 / 护眼 / 高对比度 / 跟随系统（跟随系统由渲染进程读 prefers-color-scheme） */
+export type AppTheme = 'light' | 'dark' | 'sepia' | 'high-contrast' | 'system'
 
-const APP_THEMES: AppTheme[] = ['light', 'dark', 'system']
+const APP_THEMES: AppTheme[] = ['light', 'dark', 'sepia', 'high-contrast', 'system']
 
 /** 旧版本把 mdmdt 皮肤单列成两个主题；现在它已是深浅色的默认外观，读到旧值按深浅迁移 */
 const LEGACY_THEMES: Record<string, AppTheme> = { 'mdmdt-light': 'light', 'mdmdt-dark': 'dark' }
@@ -372,10 +372,22 @@ export interface EpubExportResult {
 /** 文档检查：渲染进程不碰磁盘，引用是否存在由主进程按授权模型判定 */
 export type ResourceState = 'ok' | 'missing' | 'directory' | 'outside' | 'unknown'
 
+/** 跨文档锚点：'unknown' 表示文件读不出来，无法判定（不算问题） */
+export type AnchorState = 'ok' | 'missing' | 'unknown'
+
+export interface ResourceAnchorInput {
+  /** 目标文档绝对路径 */
+  path: string
+  /** 不带 # 的锚点 id */
+  anchor: string
+}
+
 export interface ResourceProbeInput {
   docPath: string
   /** 渲染进程解析出的绝对路径，顺序即返回顺序 */
   refs: string[]
+  /** 跨文档锚点：与 refs 同批探测目标文档里的标题是否存在 */
+  anchors?: ResourceAnchorInput[]
 }
 
 export interface AssetInfo {
@@ -387,8 +399,10 @@ export interface AssetInfo {
 
 export interface ResourceProbeResult {
   states: ResourceState[]
-  /** 文档 assets/ 目录下的实际文件，用于找未引用资源 */
+  /** 文档同级与 assets/ 目录下的实际资源文件，用于找未引用资源 */
   assets: AssetInfo[]
+  /** 与 anchors 一一对应 */
+  anchorStates: AnchorState[]
 }
 
 export interface AssetWriteInput {
@@ -618,10 +632,14 @@ export interface FileApi {
   listFolder(dir: string): Promise<FileResult<FolderEntry[]>>
   /** 在已授权文件夹里新建子目录，返回新目录绝对路径 */
   createFolder(dir: string, name: string): Promise<FileResult<string>>
+  /** 在已授权文件夹里新建 Markdown 文件（名称没有扩展名时自动补 .md），返回新文件绝对路径 */
+  createFile(dir: string, name: string): Promise<FileResult<string>>
   /** 重命名文件或文件夹（不改位置），返回新路径 */
   renamePath(target: string, name: string): Promise<FileResult<string>>
   /** 把文件或文件夹移动到另一个目录下，返回新路径 */
   movePath(target: string, destDir: string): Promise<FileResult<string>>
+  /** 删除文件或文件夹：移入系统回收站（可恢复），返回被删除的路径 */
+  trashPath(target: string): Promise<FileResult<string>>
   /** 工作区全文搜索：文件名 + 内容，支持正则 */
   searchWorkspace(input: WorkspaceSearchInput): Promise<FileResult<WorkspaceSearchResult>>
   /** 批量替换：按搜索给的哈希逐个核对后写回，保留各自编码 */
@@ -708,8 +726,10 @@ export const CHANNEL = {
   openFolder: 'mdforge:fs:open-folder',
   listFolder: 'mdforge:fs:list-folder',
   createFolder: 'mdforge:fs:create-folder',
+  createFile: 'mdforge:fs:create-file',
   renamePath: 'mdforge:fs:rename',
   movePath: 'mdforge:fs:move',
+  trashPath: 'mdforge:fs:trash',
   searchWorkspace: 'mdforge:fs:search',
   replaceWorkspace: 'mdforge:fs:replace',
   scanLinks: 'mdforge:fs:scan-links',

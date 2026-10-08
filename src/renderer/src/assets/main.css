@@ -10,6 +10,8 @@
   --mdf-faint: #d2d2d2;
   --mdf-border: #d2d2d2;
   --mdf-accent: #3e69d7;
+  /* 强调色底上的前景（复选框的勾、补全选中项的文字） */
+  --mdf-accent-fg: #ffffff;
   --mdf-error: #e30f2e;
   --mdf-code-bg: rgb(236, 236, 238);
   /* 选中态、开关描边、危险按钮底这类"强调色的浅底"都要随主题走 */
@@ -90,6 +92,74 @@ html[data-theme='dark'] {
   --mdf-syn-defprop: #1b9f72;
   --mdf-syn-comment: #667c89;
   --mdf-syn-invalid: #e30f2e;
+}
+
+/*
+ * 护眼（sepia）：暖色纸感，长文阅读用；未列出的变量沿用 :root 的浅色值
+ */
+html[data-theme='sepia'] {
+  color-scheme: light;
+  --mdf-bg: #f6eedb;
+  --mdf-panel: #fbf5e7;
+  --mdf-fg: #4a3f30;
+  --mdf-muted: #8a7a63;
+  --mdf-faint: #dccfae;
+  --mdf-border: #dccfae;
+  --mdf-accent: #a05a2c;
+  --mdf-code-bg: #eee0c4;
+  --mdf-accent-soft: rgba(160, 90, 44, 0.15);
+  --mdf-accent-edge: rgba(160, 90, 44, 0.4);
+  --mdf-overlay: rgba(246, 238, 219, 0.78);
+  --mdf-overlay-strong: rgba(246, 238, 219, 0.94);
+  --mdf-md-quote-bg: rgba(160, 90, 44, 0.07);
+  --mdf-md-quote-edge: #a05a2c;
+  --mdf-md-code-fg: #7c4a1f;
+}
+
+/*
+ * 高对比度（无障碍）：纯黑底 + 亮黄强调，色阶与深色一一对应
+ */
+html[data-theme='high-contrast'] {
+  color-scheme: dark;
+  --mdf-bg: #000000;
+  --mdf-panel: #000000;
+  --mdf-fg: #ffffff;
+  --mdf-muted: #d0d0d0;
+  --mdf-faint: #8f8f8f;
+  --mdf-border: #9e9e9e;
+  --mdf-accent: #ffd34d;
+  --mdf-accent-fg: #000000;
+  --mdf-error: #ff6b6b;
+  --mdf-code-bg: #1a1a1a;
+  --mdf-accent-soft: rgba(255, 211, 77, 0.28);
+  --mdf-accent-edge: rgba(255, 211, 77, 0.65);
+  --mdf-error-soft: rgba(255, 107, 107, 0.3);
+  --mdf-warn-soft: rgba(255, 211, 77, 0.25);
+  --mdf-shadow: rgba(0, 0, 0, 0.75);
+  --mdf-shadow-soft: rgba(0, 0, 0, 0.6);
+  --mdf-overlay: rgba(0, 0, 0, 0.82);
+  --mdf-overlay-strong: rgba(0, 0, 0, 0.95);
+  --mdf-match: rgba(255, 211, 77, 0.4);
+  --mdf-match-current: rgba(255, 211, 77, 0.7);
+  --mdf-md-quote-bg: rgba(255, 211, 77, 0.08);
+  --mdf-md-quote-edge: #ffd34d;
+  --mdf-md-code-fg: #ffe9a3;
+  --mdf-md-warn: #ffc94d;
+  --mdf-md-select: rgba(255, 211, 77, 0.35);
+  --mdf-syn-meta: #a8b6c2;
+  --mdf-syn-keyword: #ff79c6;
+  --mdf-syn-atom: #ff8f6b;
+  --mdf-syn-literal: #ffcc66;
+  --mdf-syn-string: #7bd88f;
+  --mdf-syn-regexp: #6fdc8c;
+  --mdf-syn-def: #6ea8ff;
+  --mdf-syn-local: #57d6a8;
+  --mdf-syn-type: #57d6ff;
+  --mdf-syn-class: #ff79c6;
+  --mdf-syn-macro: #ffb86c;
+  --mdf-syn-defprop: #57d6a8;
+  --mdf-syn-comment: #a8b6c2;
+  --mdf-syn-invalid: #ff6b6b;
 }
 
 html,
@@ -290,8 +360,61 @@ body {
   caret-color: var(--mdf-fg);
 }
 
+/* 折叠槽：只保留代码块的折叠标记，贴着正文左边距；栏宽居中时跟着垫出同宽的缩进 */
 .editor-host .cm-gutters {
-  display: none;
+  background: transparent;
+  border: 0;
+  color: var(--mdf-faint);
+  /* 铺满模式 --mdf-content-max 是 none：calc 失效、退回 0 左距 */
+  padding-left: max(0px, calc((100% - var(--mdf-content-max) - 28px) / 2));
+}
+
+.editor-host .cm-foldGutter {
+  width: 18px;
+}
+
+.editor-host .cm-foldGutter .cm-gutterElement {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.editor-host .cm-foldGutter .cm-gutterElement:hover {
+  color: var(--mdf-accent);
+  opacity: 1;
+}
+
+.editor-host .cm-foldPlaceholder {
+  margin: 0 4px;
+  padding: 0 6px;
+  color: var(--mdf-muted);
+  background: var(--mdf-code-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 3px;
+}
+
+/* 补全浮层：CM 自带的 base 样式只认自带的深浅主题类，这里统一改走应用变量 */
+.editor-host .cm-tooltip.cm-tooltip-autocomplete {
+  color: var(--mdf-fg);
+  background: var(--mdf-panel);
+  border: 1px solid var(--mdf-border);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px var(--mdf-shadow);
+}
+
+.editor-host .cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  padding: 2px 8px;
+}
+
+.editor-host .cm-tooltip-autocomplete ul li[aria-selected] {
+  color: var(--mdf-accent-fg);
+  background: var(--mdf-accent);
+}
+
+.editor-host .cm-tooltip.cm-tooltip-autocomplete .cm-completionDetail {
+  color: var(--mdf-muted);
 }
 
 .editor-host .cm-line {
@@ -535,11 +658,29 @@ body {
   border-radius: 8px;
   border-collapse: separate;
   border-spacing: 0;
-  overflow: hidden;
+  /* 行/列小按钮要探出表格边缘，不能裁掉；四角改由单元格自己圆角补上 */
+  overflow: visible;
+}
+
+.mdf-table-grid thead th:first-child {
+  border-top-left-radius: 7px;
+}
+
+.mdf-table-grid thead th:last-child {
+  border-top-right-radius: 7px;
+}
+
+.mdf-table-grid tbody tr:last-child td:first-child {
+  border-bottom-left-radius: 7px;
+}
+
+.mdf-table-grid tbody tr:last-child td:last-child {
+  border-bottom-right-radius: 7px;
 }
 
 .mdf-table-grid th,
 .mdf-table-grid td {
+  position: relative;
   padding: 10px;
   border: 0;
   border-left: 1px solid var(--mdf-border);
@@ -563,6 +704,69 @@ body {
 .mdf-table-grid.is-error {
   padding: 6px 10px;
   color: var(--mdf-error);
+}
+
+/* 表格结构按钮：悬停行/列头才浮出；行按钮在表格左缘之外，列按钮压在列头上沿 */
+.mdf-row-ops,
+.mdf-col-ops {
+  position: absolute;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.mdf-table-grid tbody tr:hover .mdf-row-ops,
+.mdf-table-grid thead tr:hover .mdf-row-ops,
+.mdf-table-grid th:hover .mdf-col-ops {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mdf-row-ops {
+  top: 50%;
+  left: -34px;
+  transform: translateY(-50%);
+}
+
+.mdf-col-ops {
+  top: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.mdf-table-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--mdf-muted);
+  background: var(--mdf-panel);
+  border: 1px solid var(--mdf-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* 符号用伪元素，按钮本体不带文字节点（单元格 textContent 保持干净） */
+.mdf-table-btn::before {
+  content: '＋';
+}
+
+.mdf-table-btn[data-op$='del']::before {
+  content: '－';
+}
+
+.mdf-table-btn:hover {
+  color: var(--mdf-accent);
+  border-color: var(--mdf-accent);
+}
+
+.mdf-table-btn.is-danger:hover {
+  color: var(--mdf-error);
+  border-color: var(--mdf-error);
 }
 
 /* 表格单元格的就地编辑框：与单元格等大叠在上面，其余样式由 JS 按单元格计算样式照抄 */
@@ -727,7 +931,7 @@ body {
   top: 0.5px;
   width: 5px;
   height: 9px;
-  border: 2px solid #fff;
+  border: 2px solid var(--mdf-accent-fg);
   border-top: none;
   border-left: none;
   transform: rotate(40deg);
@@ -969,6 +1173,13 @@ body {
 .files-tool:hover {
   color: var(--mdf-accent);
   border-color: var(--mdf-accent);
+}
+
+/* 文字版工具按钮：新建文件 / 新建文件夹 */
+.files-tool.is-text {
+  width: auto;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 /* 收藏区：星的开关 + 名字，排在最上面方便直接点开 */

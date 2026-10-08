@@ -1,14 +1,9 @@
 import { syntaxTree } from '@codemirror/language'
 import type { EditorState } from '@codemirror/state'
-import { createSlugger } from '../../../shared/slug'
+import { createSlugger, headingTitle } from '../../../shared/slug'
 import { frontMatterOf } from './frontmatter'
 
 const HEADING = /^(?:ATXHeading|SetextHeading)([1-6])$/
-const OPEN_MARK = /^#{1,6}\s+/
-const CLOSED_MARK = /\s+#+\s*$/
-const IMAGE = /!\[([^\]]*)\]\([^)]*\)/g
-const LINK = /\[([^\]]*)\]\([^)]*\)/g
-const WRAP = /(\*\*|__|~~|`|\*|_)/g
 
 export interface OutlineItem {
   level: number
@@ -48,18 +43,6 @@ export function outlineGuides(items: readonly OutlineItem[]): OutlineGuides[] {
     }
     return { spans, last: !hasLaterSibling(items, index, item.level) }
   })
-}
-
-/** 大纲与锚点用纯文本标题，标记符要去掉 */
-export function headingTitle(raw: string): string {
-  return raw
-    .replace(OPEN_MARK, '')
-    .replace(CLOSED_MARK, '')
-    .replace(IMAGE, '$1')
-    .replace(LINK, '$1')
-    .replace(WRAP, '')
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 export function collectOutline(state: EditorState): OutlineItem[] {

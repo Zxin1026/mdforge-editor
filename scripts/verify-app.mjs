@@ -502,6 +502,31 @@ check(
   JSON.stringify(l3)
 )
 
+/* 括号配对 / 反引号围栏 / 语言补全：输入手感 */
+await replaceAll(true, '配对')
+await win3.keyboard.type('(中')
+await win3.waitForTimeout(150)
+l3 = await readLines(win3)
+check('左括号自动补右括号，输入落在括号里', l3[0] === '配对(中)', l3[0])
+await win3.keyboard.type(')')
+await win3.waitForTimeout(120)
+l3 = await readLines(win3)
+check('补出的右括号被跳过而不是叠加', l3[0] === '配对(中)', l3[0])
+
+await replaceAll(true, '围栏')
+await win3.keyboard.type('```')
+await win3.waitForTimeout(150)
+l3 = await readLines(win3)
+check('连敲三个反引号原样落字（围栏不被配对撑成四个）', l3[0] === '围栏```', l3[0])
+
+await replaceAll(true, '标签')
+await win3.keyboard.type(' <di')
+await win3.waitForTimeout(500)
+const popupCount = await win3.locator('.cm-tooltip-autocomplete').count()
+check('输入 <di 弹出 HTML 标签补全', popupCount >= 1, `popups=${popupCount}`)
+await win3.keyboard.press('Escape')
+await win3.waitForTimeout(200)
+
 await replaceAll(true, 'hello hello hello')
 await win3.keyboard.press('Control+f')
 await win3.waitForTimeout(200)
@@ -729,6 +754,27 @@ check('mermaid 渲染成 SVG', mermaidOk)
 const mermaidNote = await win7.evaluate(() => document.querySelector('.mdf-mermaid')?.textContent ?? '')
 check('mermaid 未报错', !mermaidNote.includes('失败'), mermaidNote.slice(0, 70))
 
+/* 折叠槽：可折叠的行（代码块/章节）出现标记，点一下收拢、再点展开 */
+const foldTarget = await win7.evaluate(() => {
+  const els = [...document.querySelectorAll('.cm-foldGutter .cm-gutterElement')]
+  for (const el of els) {
+    const span = el.querySelector('span')
+    if (!span || getComputedStyle(el).visibility === 'hidden') continue
+    const box = span.getBoundingClientRect()
+    if (box.width > 0) return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  }
+  return null
+})
+check('折叠槽出现折叠标记', foldTarget !== null, JSON.stringify(foldTarget))
+if (foldTarget) {
+  await win7.mouse.click(foldTarget.x, foldTarget.y)
+  await win7.waitForTimeout(300)
+  check('点折叠标记能收拢代码块', (await win7.locator('.cm-foldPlaceholder').count()) >= 1, '')
+  await win7.mouse.click(foldTarget.x, foldTarget.y)
+  await win7.waitForTimeout(300)
+  check('再点一次恢复展开', (await win7.locator('.cm-foldPlaceholder').count()) === 0, '')
+}
+
 const grid = await win7.evaluate(() => {
   const table = document.querySelector('.mdf-table-grid')
   if (!table) return null
@@ -767,6 +813,41 @@ await win7.waitForTimeout(300)
 const undoCell = await win7.evaluate(() => document.querySelector('.mdf-table-grid tbody td')?.textContent ?? '')
 check('撤销回退单元格修改', undoCell === '苹果', undoCell)
 await win7.screenshot({ path: path.join(root, 'verify', 'table-edit.png') })
+
+/* 表格结构按钮：悬停行首/列表头浮出加删按钮，落字后撤销回原样 */
+const rowCount0 = await win7.locator('.mdf-table-grid tbody tr').count()
+await win7.locator('.mdf-table-grid tbody tr').first().hover()
+await win7.locator('.mdf-table-grid tbody tr').first().locator('[data-op="row-add"]').click()
+await win7.waitForTimeout(350)
+check('行首 ＋ 插入一条空行', (await win7.locator('.mdf-table-grid tbody tr').count()) === rowCount0 + 1, '')
+
+const colCount0 = await win7.locator('.mdf-table-grid thead th').count()
+await win7.locator('.mdf-table-grid thead th').first().hover()
+await win7.locator('.mdf-table-grid thead th').first().locator('[data-op="col-add"]').click()
+await win7.waitForTimeout(350)
+check('列头 ＋ 插入一列', (await win7.locator('.mdf-table-grid thead th').count()) === colCount0 + 1, '')
+await win7.screenshot({ path: path.join(root, 'verify', 'table-ops.png') })
+
+await win7.locator('.mdf-table-grid tbody tr').first().hover()
+await win7.locator('.mdf-table-grid tbody tr').first().locator('[data-op="row-del"]').click()
+await win7.waitForTimeout(350)
+check('行首 － 删掉一行', (await win7.locator('.mdf-table-grid tbody tr').count()) === rowCount0, '')
+
+await win7.locator('.mdf-table-grid thead th').nth(1).hover()
+await win7.locator('.mdf-table-grid thead th').nth(1).locator('[data-op="col-del"]').click()
+await win7.waitForTimeout(350)
+check('列头 － 删掉一列', (await win7.locator('.mdf-table-grid thead th').count()) === colCount0, '')
+
+for (let step = 0; step < 4; step++) {
+  await win7.keyboard.press('Control+z')
+  await win7.waitForTimeout(200)
+}
+const restoredCell7 = await win7.evaluate(() => document.querySelector('.mdf-table-grid tbody td')?.textContent ?? '')
+check(
+  '四个结构操作都进了撤销栈，撤销后回到原表格',
+  restoredCell7 === '苹果' && (await win7.locator('.mdf-table-grid tbody tr').count()) === rowCount0,
+  restoredCell7
+)
 
 /* 粘贴一张 Markdown 表格（光标停在表格末尾）：网格常驻、单元格去掉标记；走进内部才切源码 */
 const PASTED_TABLE = [
@@ -1570,6 +1651,24 @@ await win13.waitForTimeout(250)
 check('主题菜单切回浅色', (await dataTheme()) === 'light', await dataTheme())
 check('浅色即 mdmdt-light 外观（底色 #fafafc）', (await bodyBg()) === 'rgb(250, 250, 252)', await bodyBg())
 await win13.screenshot({ path: path.join(root, 'verify', 'theme-light.png') })
+
+/* 护眼与高对比度：明暗之外的两档皮肤 */
+await win13.locator('.mdf-menu-item[data-menu-label="护眼"]').click()
+await win13.waitForTimeout(300)
+check('主题切到护眼皮肤（暖纸色）', (await dataTheme()) === 'sepia' && (await bodyBg()) === 'rgb(246, 238, 219)', `${await dataTheme()}|${await bodyBg()}`)
+check('护眼菜单项打勾', (await menuMark('护眼')) === '✓', await menuMark('护眼'))
+await win13.screenshot({ path: path.join(root, 'verify', 'theme-sepia.png') })
+await win13.locator('.mdf-menu-item[data-menu-label="高对比度"]').click()
+await win13.waitForTimeout(300)
+check(
+  '高对比度是纯黑底',
+  (await dataTheme()) === 'high-contrast' && (await bodyBg()) === 'rgb(0, 0, 0)',
+  `${await dataTheme()}|${await bodyBg()}`
+)
+await win13.screenshot({ path: path.join(root, 'verify', 'theme-high-contrast.png') })
+await win13.locator('.mdf-menu-item[data-menu-label="浅色"]').click()
+await win13.waitForTimeout(250)
+check('主题能切回浅色', (await dataTheme()) === 'light', await dataTheme())
 await win13.keyboard.press('Escape')
 await win13.waitForTimeout(150)
 
@@ -1687,7 +1786,10 @@ writeFileSync(
   'utf8'
 )
 writeFileSync(path.join(folderFixture, '子目录', 'inner.md'), '# 子目录笔记\n\n[回 day01](../day01.md)\n', 'utf8')
-/* 检查器新规则的靶子：重复标题、空图片描述、未闭合代码块、front matter 问题、超长行 */
+/* 文档同级的孤立图片：未引用资源要连它一起查出来（不能只看 assets/） */
+writeFileSync(path.join(folderFixture, '封面.png'), makePng(20, 20))
+/* 检查器新规则的靶子：重复标题、空图片描述、未闭合代码块、front matter 问题、
+   超长行、待办占位符、跨文档锚点（目标存在但没有这一节） */
 writeFileSync(
   path.join(folderFixture, 'lint-问题.md'),
   [
@@ -1702,6 +1804,10 @@ writeFileSync(
     '## 重复标题',
     '',
     '![](assets/p1.png)',
+    '',
+    'TODO: 发布前补上演示图',
+    '',
+    '[跳 day01 的一节](day01.md#不存在的标题)',
     '',
     'x'.repeat(220),
     '',
@@ -1783,6 +1889,34 @@ check(
   ''
 )
 
+/* 新建文件：工具按钮 → 就地输入名字 → 建好直接打开 */
+await win13.click('.files-tool[data-tool="new-file"]')
+await win13.waitForSelector('.file-rename-input')
+await win13.locator('.file-rename-input').fill('新笔记')
+await win13.keyboard.press('Enter')
+await win13.waitForTimeout(800)
+check(
+  '工具按钮新建 Markdown 文件并直接打开',
+  (await win13.locator('.file-item[data-file-path$="新笔记.md"]').count()) === 1 &&
+    (await win13.textContent('#file-name')).includes('新笔记.md'),
+  await win13.textContent('#file-name')
+)
+
+/* 删除：右键 → 移入回收站（应用内确认框），已打开的标签一起关掉 */
+await win13.locator('.file-item[data-file-path$="新笔记.md"]').click({ button: 'right' })
+await win13.waitForSelector('.mdf-menu [data-menu-label="删除（移入回收站）"]')
+await win13.locator('.mdf-menu [data-menu-label="删除（移入回收站）"]').click()
+await win13.waitForSelector('.mdf-dialog')
+check('删除前弹确认框', (await dialogText(win13)).includes('回收站'), await dialogText(win13))
+await answer(win13, '移入回收站')
+await win13.waitForTimeout(900)
+check(
+  '删除后文件树与标签都不再显示',
+  (await win13.locator('.file-item[data-file-path$="新笔记.md"]').count()) === 0 &&
+    !(await win13.textContent('#file-name')).includes('新笔记.md'),
+  await win13.textContent('#file-name')
+)
+
 /* 检查器新规则与编辑器内联标记：打开带问题的文档跑一次文档检查 */
 await win13.locator('.file-item[data-file-path$="lint-问题.md"]').click()
 await win13.waitForTimeout(600)
@@ -1797,8 +1931,24 @@ check(
     lintHeads.some((text) => text.includes('空图片描述 1')) &&
     lintHeads.some((text) => text.includes('未闭合代码块 1')) &&
     lintHeads.some((text) => text.includes('Front Matter 问题 2')) &&
-    lintHeads.some((text) => text.includes('超长行 1')),
+    lintHeads.some((text) => text.includes('超长行 1')) &&
+    lintHeads.some((text) => text.includes('待办占位符 1')) &&
+    lintHeads.some((text) => text.includes('坏链 1')) &&
+    lintHeads.some((text) => text.includes('未引用资源 1')),
   JSON.stringify(lintHeads)
+)
+const lintDetails = await win13.$$eval('.issue-detail', (els) => els.map((el) => el.textContent))
+check(
+  '待办占位符与跨文档锚点各有说明',
+  lintDetails.some((text) => text.includes('占位符')) &&
+    lintDetails.some((text) => text.includes('#不存在的标题') && text.includes('目标文档')),
+  JSON.stringify(lintDetails.slice(0, 2))
+)
+const lintLabels = await win13.$$eval('.issue-label', (els) => els.map((el) => el.textContent))
+check(
+  '同级散落的未引用图片被点名',
+  lintLabels.some((text) => text.includes('封面.png')),
+  JSON.stringify(lintLabels)
 )
 /* 行内标记只看当前显示的编辑器：隐藏标签的 cm-line 也在 DOM 里 */
 const readActiveMarks = () =>
@@ -1908,7 +2058,7 @@ await win13.click('.issues-run[data-action="links-graph"]')
 await win13.waitForSelector('.mdf-graph-node', { timeout: 9000 })
 const graphNodes = await win13.locator('.mdf-graph-node').count()
 const graphEdges = await win13.locator('.mdf-graph-edge').count()
-check('关系图画出全部文档与链接', graphNodes === 5 && graphEdges === 3, `nodes=${graphNodes} edges=${graphEdges}`)
+check('关系图画出全部文档与链接', graphNodes === 5 && graphEdges === 4, `nodes=${graphNodes} edges=${graphEdges}`)
 await win13.screenshot({ path: path.join(root, 'verify', 'graph.png') })
 await win13.keyboard.press('Escape')
 await win13.waitForTimeout(300)

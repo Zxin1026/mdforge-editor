@@ -1,5 +1,23 @@
 const REMOVED = /[^\p{L}\p{N} \-_]/gu
 
+const OPEN_MARK = /^#{1,6}\s+/
+const CLOSED_MARK = /\s+#+\s*$/
+const IMAGE = /!\[([^\]]*)\]\([^)]*\)/g
+const LINK = /\[([^\]]*)\]\([^)]*\)/g
+const WRAP = /(\*\*|__|~~|`|\*|_)/g
+
+/** 大纲与锚点都用纯文本标题：去掉 # 标记、图片取 alt、链接取文字、剥掉强调包裹符 */
+export function headingTitle(raw: string): string {
+  return raw
+    .replace(OPEN_MARK, '')
+    .replace(CLOSED_MARK, '')
+    .replace(IMAGE, '$1')
+    .replace(LINK, '$1')
+    .replace(WRAP, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 export interface Slugger {
   slug(text: string): string
 }

@@ -1,6 +1,6 @@
 import type { EditorState } from '@codemirror/state'
 import { scanFences, type FenceScan } from '../../../shared/fences'
-import type { ResourceState } from '../../../shared/ipc'
+import type { AnchorState, ResourceState } from '../../../shared/ipc'
 import { slugOnce } from '../../../shared/slug'
 import { dirOf } from './assets'
 import { frontMatterOf } from './frontmatter'
@@ -14,6 +14,7 @@ export type IssueKind =
   | 'unused-asset'
   | 'duplicate-heading'
   | 'empty-image-alt'
+  | 'todo-placeholder'
   | 'unclosed-fence'
   | 'invalid-frontmatter'
   | 'long-line'
@@ -41,7 +42,20 @@ export interface AssetEntry {
 
 /** 磁盘访问由调用方注入：检查逻辑本身不碰 fs，方便单测 */
 export interface InspectSource {
-  probe(refs: string[]): Promise<{ states: ResourceState[]; assets: AssetEntry[] }>
+  probe(
+    refs: string[],
+    /** 跨文档锚点：目标文档读不出来时对应状态为 unknown（无法判定，不当问题报） */
+    anchors?: ReadonlyArray<{ path: string; anchor: string }>
+  ): Promise<{ states: ResourceState[]; assets: AssetEntry[]; anchorStates?: readonly AnchorState[] }>
+}
+
+/** 链接目标里 # 之后的锚点：%E6%96%87 这类编码还原成文本 */
+function decodeAnchor(raw: string): string {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
 }
 
 export interface InspectReport {
@@ -60,6 +74,7 @@ export const ISSUE_TITLES: Record<IssueKind, string> = {
   'unused-asset': '未引用资源',
   'duplicate-heading': '重复标题',
   'empty-image-alt': '空图片描述',
+  'todo-placeholder': '待办占位符',
   'unclosed-fence': '未闭合代码块',
   'invalid-frontmatter': 'Front Matter 问题',
   'long-line': '超长行'
@@ -75,6 +90,7 @@ export const ISSUE_SEVERITY: Record<IssueKind, 'error' | 'warning'> = {
   'unused-asset': 'warning',
   'duplicate-heading': 'warning',
   'empty-image-alt': 'warning',
+  'todo-placeholder': 'warning',
   'long-line': 'warning'
 }
 
@@ -86,6 +102,7 @@ export const KIND_ORDER: IssueKind[] = [
   'invalid-frontmatter',
   'duplicate-heading',
   'empty-image-alt',
+  'todo-placeholder',
   'heading-jump',
   'long-line',
   'unused-asset'
@@ -255,6 +272,31 @@ export function longLineIssues(state: EditorState, fences: FenceScan): Issue[] {
   return issues
 }
 
+/** 占位符：写完文档前最容易忘的记号，大小写敏感（小写 todo 多在正常行文里） */
+const TODO_MARK = /\bTODO\b|\bFIXME\b|待补充/
+const MAX_TODO_ISSUES = 50
+
+/** 待办占位符扫描：TODO / FIXME / 待补充，每行最多点一次名 */
+export function todoMarkerIssues(state: EditorState): Issue[] {
+  const issues: Issue[] = []
+  for (let number = 1; number <= state.doc.lines; number += 1) {
+    const line = state.doc.line(number)
+    const match = TODO_MARK.exec(line.text)
+    if (match === null) continue
+    issues.push({
+      kind: 'todo-placeholder',
+      line: number,
+      col: match.index + 1,
+      pos: line.from + match.index,
+      end: line.from + match.index + match[0].length,
+      label: `第 ${number} 行 · ${match[0]}`,
+      detail: '这一处还留着占位符，发布前记得处理'
+    })
+    if (issues.length >= MAX_TODO_ISSUES) break
+  }
+  return issues
+}
+
 function formatSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
@@ -263,7 +305,7 @@ function formatSize(bytes: number): string {
 
 /**
  * 文档检查：缺图、坏链、标题跳级、未引用资源、重复标题、空图片描述、
- * 未闭合代码块、front matter 异常、超长行。
+ * 待办占位符、未闭合代码块、front matter 异常、超长行，另核对跨文档锚点。
  * 存在性判断走主进程的授权模型，外部链接不联网所以只报数量。
  */
 export async function inspectDocument(
@@ -280,9 +322,20 @@ export async function inspectDocument(
     ...duplicateHeadings(outline),
     ...fenceIssues(state, fences),
     ...frontMatterIssues(state),
+    ...todoMarkerIssues(state),
     ...longLineIssues(state, fences)
   ]
   const pending: { absolute: string; kind: IssueKind; label: string; line: number; col: number; pos: number }[] = []
+  /** 指向文档的链接如果带 #锚点：引用本文件按内存大纲核对，其余交给主进程 */
+  const pendingAnchors: Array<{
+    absolute: string
+    anchor: string
+    sameDoc: boolean
+    line: number
+    col: number
+    pos: number
+    label: string
+  }> = []
   const referenced = new Set<string>()
   let external = 0
 
@@ -314,8 +367,9 @@ export async function inspectDocument(
       continue
     }
     if (target.kind === 'anchor') {
-      if (!anchors.has(target.url)) {
-        issues.push({ kind: 'broken-link', line, col, pos, label, detail: `文内没有名为 #${target.url} 的标题锚点` })
+      const anchor = decodeAnchor(target.url)
+      if (!anchors.has(anchor)) {
+        issues.push({ kind: 'broken-link', line, col, pos, label, detail: `文内没有名为 #${anchor} 的标题锚点` })
       }
       continue
     }
@@ -334,6 +388,23 @@ export async function inspectDocument(
     }
 
     referenced.add(toPosix(target.localPath).toLowerCase())
+
+    if (target.kind === 'relative-md') {
+      const hashIndex = target.raw.indexOf('#')
+      const anchor = hashIndex >= 0 ? decodeAnchor(target.raw.slice(hashIndex + 1)) : ''
+      if (anchor !== '') {
+        pendingAnchors.push({
+          absolute: target.localPath,
+          anchor,
+          // 指向自己：按内存里的大纲核对，磁盘上的版本可能已经过时
+          sameDoc: docPath !== '' && toPosix(target.localPath).toLowerCase() === toPosix(docPath).toLowerCase(),
+          line,
+          col,
+          pos,
+          label
+        })
+      }
+    }
     pending.push({
       absolute: target.localPath,
       kind: target.kind === 'image' ? 'missing-image' : 'broken-link',
@@ -344,7 +415,11 @@ export async function inspectDocument(
     })
   }
 
-  const probe = await source.probe(pending.map((item) => item.absolute))
+  const remoteAnchors = pendingAnchors.filter((item) => !item.sameDoc)
+  const probe = await source.probe(
+    pending.map((item) => item.absolute),
+    remoteAnchors.map((item) => ({ path: item.absolute, anchor: item.anchor }))
+  )
   pending.forEach((item, order) => {
     const status = probe.states[order]
     if (status === 'ok') return
@@ -357,6 +432,36 @@ export async function inspectDocument(
       detail: stateDetail(status ?? 'unknown')
     })
   })
+
+  // 跨文档锚点：文件读不出来（unknown）不算问题，确认没有这个标题才报
+  const anchorStates = probe.anchorStates ?? []
+  let anchorOrder = 0
+  for (const item of pendingAnchors) {
+    if (item.sameDoc) {
+      if (!anchors.has(item.anchor)) {
+        issues.push({
+          kind: 'broken-link',
+          line: item.line,
+          col: item.col,
+          pos: item.pos,
+          label: item.label,
+          detail: `文内没有名为 #${item.anchor} 的标题锚点`
+        })
+      }
+      continue
+    }
+    const status = anchorStates[anchorOrder]
+    anchorOrder += 1
+    if (status !== 'missing') continue
+    issues.push({
+      kind: 'broken-link',
+      line: item.line,
+      col: item.col,
+      pos: item.pos,
+      label: item.label,
+      detail: `目标文档里没有名为 #${item.anchor} 的标题锚点`
+    })
+  }
 
   let note = `检查了 ${pending.length} 个本地引用，${external} 个外部链接未联网核对`
   if (docPath !== '') {
@@ -373,7 +478,7 @@ export async function inspectDocument(
         path: asset.absolute
       })
     }
-    if (probe.assets.length > 0) note += `，扫描了 ${probe.assets.length} 个 assets/ 文件`
+    if (probe.assets.length > 0) note += `，扫描了 ${probe.assets.length} 个资源文件`
   }
 
   issues.sort((a, b) => {

@@ -10,6 +10,10 @@ export interface FilesViewDeps {
   /** 文件操作由工作区执行（要同步标签路径），返回是否成功 */
   rename(target: string, name: string): Promise<boolean>
   createFolder(dir: string, name: string): Promise<boolean>
+  /** 新建 Markdown 文件并打开 */
+  createFile(dir: string, name: string): Promise<boolean>
+  /** 删除：移入系统回收站；已打开的文档会先走关标签确认 */
+  deleteEntry(path: string, kind: 'file' | 'dir'): Promise<boolean>
   move(target: string, destDir: string): Promise<boolean>
   favorites(): readonly string[]
   toggleFavorite(path: string): void
@@ -56,7 +60,7 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
   const expanded = new Set<string>()
   const loadingDirs = new Set<string>()
   /** 正在就地编辑的条目：{ dir, mode } —— dir 为新条目挂载的目录 */
-  let editing: { dir: string; mode: 'rename' | 'new'; target: string } | null = null
+  let editing: { dir: string; mode: 'rename' | 'new' | 'new-file'; target: string } | null = null
   let menu: MenuHandle | null = null
 
   function panel(): HTMLElement {
@@ -166,10 +170,22 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
     name.className = 'files-root-name'
     name.textContent = root === null ? '' : baseName(root)
     name.title = root ?? ''
+    const addFile = document.createElement('button')
+    addFile.type = 'button'
+    addFile.className = 'files-tool is-text'
+    addFile.textContent = '新文件'
+    addFile.title = '新建 Markdown 文件'
+    addFile.dataset.tool = 'new-file'
+    addFile.addEventListener('click', () => {
+      if (root === null) return
+      editing = { dir: root, mode: 'new-file', target: '' }
+      if (!expanded.has(keyOf(root))) expanded.add(keyOf(root))
+      render()
+    })
     const add = document.createElement('button')
     add.type = 'button'
-    add.className = 'files-tool'
-    add.textContent = '＋'
+    add.className = 'files-tool is-text'
+    add.textContent = '新文件夹'
     add.title = '新建文件夹'
     add.dataset.tool = 'new-folder'
     add.addEventListener('click', () => {
@@ -185,7 +201,7 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
     refresh.title = '刷新'
     refresh.dataset.tool = 'refresh'
     refresh.addEventListener('click', () => void reload())
-    head.append(name, add, refresh)
+    head.append(name, addFile, add, refresh)
 
     // 根行同时是"拖到最外层"的落点
     head.classList.add('is-drop-root')
@@ -256,8 +272,8 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
     box.className = depth === 0 ? 'file-list' : 'file-children'
     box.dataset.dir = dir
 
-    if (editing !== null && editing.mode === 'new' && keyOf(editing.dir) === keyOf(dir)) {
-      box.appendChild(nameInput(depth, editing.dir, ''))
+    if (editing !== null && editing.mode !== 'rename' && keyOf(editing.dir) === keyOf(dir)) {
+      box.appendChild(nameInput(depth, editing.dir, '', editing.mode))
     }
 
     for (const entry of entries) {
@@ -275,7 +291,7 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
           if (!loadingDirs.has(key)) void ensureLoaded(entry.path).then(() => render())
           continue
         }
-        if (children.length === 0 && !(editing !== null && editing.mode === 'new' && keyOf(editing.dir) === key)) {
+        if (children.length === 0 && !(editing !== null && editing.mode !== 'rename' && keyOf(editing.dir) === key)) {
           const blankRow = document.createElement('div')
           blankRow.className = 'files-note is-child'
           blankRow.style.paddingLeft = `${indentFor(depth + 1)}px`
@@ -295,7 +311,7 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
 
   function entryRow(entry: FolderEntry, depth: number): HTMLElement {
     if (editing !== null && editing.mode === 'rename' && keyOf(editing.target) === keyOf(entry.path)) {
-      return nameInput(depth, editing.dir, entry.name)
+      return nameInput(depth, editing.dir, entry.name, 'rename')
     }
 
     const row = document.createElement('div')
@@ -390,7 +406,12 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
 
   // ---- 就地改名 / 新建 ----
 
-  function nameInput(depth: number, dir: string, initial: string): HTMLElement {
+  function nameInput(
+    depth: number,
+    dir: string,
+    initial: string,
+    mode: 'rename' | 'new' | 'new-file'
+  ): HTMLElement {
     const wrap = document.createElement('div')
     wrap.className = 'file-item is-editing'
     wrap.style.paddingLeft = `${indentFor(depth)}px`
@@ -398,7 +419,7 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
     input.type = 'text'
     input.className = 'file-rename-input'
     input.value = initial
-    input.placeholder = '名称'
+    input.placeholder = mode === 'new-file' ? '文件名（默认 .md）' : '名称'
     input.spellcheck = false
     wrap.appendChild(input)
 
@@ -407,7 +428,6 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
       if (done) return
       done = true
       const value = input.value.trim()
-      const mode = editing?.mode
       const target = editing?.target ?? ''
       editing = null
       if (!commit || value === '' || value === initial) {
@@ -415,9 +435,14 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
         return
       }
       void (async () => {
-        const ok = mode === 'new' ? await deps.createFolder(dir, value) : await deps.rename(target, value)
+        const ok =
+          mode === 'rename'
+            ? await deps.rename(target, value)
+            : mode === 'new-file'
+              ? await deps.createFile(dir, value)
+              : await deps.createFolder(dir, value)
         if (ok) {
-          if (mode === 'new') expanded.add(keyOf(dir))
+          if (mode !== 'rename') expanded.add(keyOf(dir))
           await reload()
         } else render()
       })()
@@ -450,6 +475,15 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
       entry.kind === 'dir'
         ? [
             {
+              label: '新建文件',
+              run: () => {
+                editing = { dir: entry.path, mode: 'new-file', target: '' }
+                expanded.add(keyOf(entry.path))
+                void ensureLoaded(entry.path).then(() => render())
+                render()
+              }
+            },
+            {
               label: '新建文件夹',
               run: () => {
                 editing = { dir: entry.path, mode: 'new', target: '' }
@@ -470,7 +504,9 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
               label: starred ? '取消收藏' : '收藏',
               run: () => deps.toggleFavorite(entry.path)
             },
-            { label: '在文件夹中显示', run: () => deps.reveal(entry.path) }
+            { label: '在文件夹中显示', run: () => deps.reveal(entry.path) },
+            { divider: true, label: '' },
+            { label: '删除（移入回收站）', run: () => void deps.deleteEntry(entry.path, 'dir') }
           ]
         : [
             { label: '打开', run: () => deps.openFile(entry.path) },
@@ -486,7 +522,9 @@ export function createFilesView(deps: FilesViewDeps): FilesView {
               label: starred ? '取消收藏' : '收藏',
               run: () => deps.toggleFavorite(entry.path)
             },
-            { label: '在文件夹中显示', run: () => deps.reveal(entry.path) }
+            { label: '在文件夹中显示', run: () => deps.reveal(entry.path) },
+            { divider: true, label: '' },
+            { label: '删除（移入回收站）', run: () => void deps.deleteEntry(entry.path, 'file') }
           ]
     menu = openContextMenu({ x: event.clientX, y: event.clientY }, entries, () => {
       menu = null
