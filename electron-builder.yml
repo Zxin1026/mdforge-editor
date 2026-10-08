@@ -41,3 +41,8 @@ nsis:
   artifactName: ${productName}-${version}-setup.${ext}
 portable:
   artifactName: ${productName}-${version}-portable.${ext}
+# 自动更新：app-update.yml 写进包内，更新元数据 latest.yml 随安装包一起发布
+publish:
+  provider: github
+  owner: Zxin1026
+  repo: mdforge-editor

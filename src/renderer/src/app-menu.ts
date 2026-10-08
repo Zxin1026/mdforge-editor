@@ -10,6 +10,8 @@ import {
   type AppTheme,
   type ContentWidth,
   type EditorFontSize,
+  type UpdateCheckOutcome,
+  type UpdateEvent,
   type ViewMode
 } from '../../shared/ipc'
 import { askDialog } from './dialog'
@@ -68,6 +70,11 @@ export interface AppMenuContext {
   theme(): AppTheme
   setTheme(mode: AppTheme): void
   appVersion(): Promise<string>
+  checkUpdates(): Promise<UpdateCheckOutcome>
+  downloadUpdate(): Promise<boolean>
+  installUpdate(): void
+  /** 重启更新前：有未保存内容时先走保存确认；返回是否放行 */
+  settleForRestart(): Promise<boolean>
 }
 
 const FONT_SIZE_LABELS: Record<EditorFontSize, string> = {
@@ -111,6 +118,99 @@ async function showAbout(ctx: AppMenuContext): Promise<void> {
     body: 'MDForge —— 所见即所得的 Markdown 编辑器',
     note: `版本 ${version}`,
     options: [{ label: '好的', value: true, kind: 'default' }],
+    cancelValue: true
+  })
+}
+
+/** 帮助菜单的"检查更新"：available / downloaded 的弹窗由更新事件推送，不在这里重复 */
+async function checkForUpdates(ctx: AppMenuContext): Promise<void> {
+  const outcome = await ctx.checkUpdates()
+  if (outcome.status === 'available' || outcome.status === 'downloaded') return
+  if (outcome.status === 'downloading') {
+    await askDialog<boolean>({
+      title: '检查更新',
+      body: `新版本 v${outcome.version} 正在后台下载`,
+      note: '下载完成后会提醒你重启安装',
+      options: [{ label: '知道了', value: true, kind: 'default' }],
+      cancelValue: true
+    })
+    return
+  }
+  if (outcome.status === 'latest') {
+    await askDialog<boolean>({
+      title: '检查更新',
+      body: '当前已是最新版本',
+      note: `版本 ${outcome.version}`,
+      options: [{ label: '好的', value: true, kind: 'default' }],
+      cancelValue: true
+    })
+    return
+  }
+  if (outcome.status === 'unavailable') {
+    await askDialog<boolean>({
+      title: '检查更新',
+      body: '当前运行方式不支持自动更新',
+      note: '开发模式与便携版请到 GitHub 发布页手动下载新版本',
+      options: [{ label: '好的', value: true, kind: 'default' }],
+      cancelValue: true
+    })
+    return
+  }
+  await askDialog<boolean>({
+    title: '检查更新',
+    body: '检查失败，可能是网络无法访问 GitHub',
+    note: '稍后再试；自动检查也会在下次启动时继续',
+    options: [{ label: '好的', value: true, kind: 'default' }],
+    cancelValue: true
+  })
+}
+
+/** 主进程推来的更新事件：下载询问 / 重启提醒 / 下载失败，全用应用内对话框 */
+export async function handleUpdateEvent(event: UpdateEvent, ctx: AppMenuContext): Promise<void> {
+  if (event.kind === 'available') {
+    const choice = await askDialog<'download' | 'later'>({
+      title: '发现新版本',
+      body: `MDForge ${event.version} 已发布，是否现在下载？`,
+      note: '下载在后台进行，完成后会提醒你重启安装',
+      options: [
+        { label: '下载更新', value: 'download', kind: 'default' },
+        { label: '稍后', value: 'later' }
+      ],
+      cancelValue: 'later'
+    })
+    if (choice !== 'download') return
+    if (!(await ctx.downloadUpdate())) return
+    await askDialog<boolean>({
+      title: '正在下载更新',
+      body: `v${event.version} 已在后台下载`,
+      note: '下载期间可以继续编辑，完成后会再提醒',
+      options: [{ label: '知道了', value: true, kind: 'default' }],
+      cancelValue: true
+    })
+    return
+  }
+  if (event.kind === 'downloaded') {
+    const choice = await askDialog<'restart' | 'later'>({
+      title: '更新已就绪',
+      body: `v${event.version} 已下载完成，重启后生效`,
+      note: '选“退出时自动安装”后，下次正常退出 MDForge 会自动完成安装',
+      options: [
+        { label: '立即重启安装', value: 'restart', kind: 'default' },
+        { label: '退出时自动安装', value: 'later' }
+      ],
+      cancelValue: 'later'
+    })
+    if (choice !== 'restart') return
+    // 有未保存内容先走保存确认；取消就留在当前版本，下次再提醒
+    if (!(await ctx.settleForRestart())) return
+    ctx.installUpdate()
+    return
+  }
+  await askDialog<boolean>({
+    title: '更新下载失败',
+    body: '可能是网络波动或无法访问 GitHub',
+    note: '稍后可在“帮助 → 检查更新”里重试',
+    options: [{ label: '知道了', value: true, kind: 'default' }],
     cancelValue: true
   })
 }
@@ -370,6 +470,7 @@ function helpMenu(ctx: AppMenuContext): MenuBarMenu {
     build: () => [
       { label: '快捷键参考', run: () => void showShortcuts() },
       { divider: true, label: '' },
+      { label: '检查更新', run: () => void checkForUpdates(ctx) },
       { label: '关于 MDForge', run: () => void showAbout(ctx) }
     ]
   }

@@ -483,6 +483,21 @@ export const ENCODING_CHOICES: ChoosableEncoding[] = ['utf-8', 'utf-8-bom', 'gbk
 
 export const AUTOSAVE_DELAY_MS = 3000
 
+/** 手动检查更新的结果：version 是当前版本或发现的新版本号 */
+export type UpdateCheckStatus = 'latest' | 'available' | 'downloading' | 'downloaded' | 'unavailable' | 'error'
+
+export interface UpdateCheckOutcome {
+  status: UpdateCheckStatus
+  version: string
+}
+
+/** 主进程推送的更新事件：下载询问、重启提醒、下载失败提示都由它驱动 */
+export interface UpdateEvent {
+  kind: 'available' | 'downloaded' | 'failed'
+  /** available / downloaded 为新版本号，failed 为当前版本号 */
+  version: string
+}
+
 export interface FileApi {
   open(): Promise<FileResult<FileSnapshot | null>>
   openMany(): Promise<FileResult<string[]>>
@@ -555,6 +570,11 @@ export interface FileApi {
   closeWindow(): Promise<boolean>
   /** 应用信息：帮助菜单的"关于"用 */
   appVersion(): Promise<string>
+  /** 自动更新：手动检查 / 开始下载 / 重启安装；弹窗由 onUpdateEvent 推送驱动 */
+  checkUpdates(): Promise<UpdateCheckOutcome>
+  downloadUpdate(): Promise<boolean>
+  installUpdate(): void
+  onUpdateEvent(cb: (event: UpdateEvent) => void): void
   /** 注册拖放回调：preload 从操作系统拖放事件里提取绝对路径后调用 */
   onDropFiles(cb: (paths: string[]) => void): void
   /** 主进程收到第二个实例的启动参数（双击 .md 复用已开窗口），渲染进程重新拉取 startupPaths */
@@ -612,5 +632,9 @@ export const CHANNEL = {
   setZoom: 'mdforge:window:zoom',
   closeWindow: 'mdforge:window:close-request',
   appVersion: 'mdforge:app:version',
+  checkUpdates: 'mdforge:update:check',
+  downloadUpdate: 'mdforge:update:download',
+  installUpdate: 'mdforge:update:install',
+  updateEvent: 'mdforge:update:event',
   startupOpen: 'mdforge:startup:open'
 } as const

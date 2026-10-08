@@ -1,10 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { CHANNEL, type ExternalChange, type FileApi, type SessionData } from '../shared/ipc'
+import { CHANNEL, type ExternalChange, type FileApi, type SessionData, type UpdateEvent } from '../shared/ipc'
 
 const dropHandlers: Array<(paths: string[]) => void> = []
 const changeHandlers: Array<(change: ExternalChange) => void> = []
 const closeHandlers: Array<() => void> = []
 const startupHandlers: Array<() => void> = []
+const updateHandlers: Array<(event: UpdateEvent) => void> = []
 
 function pathForFile(file: File): string {
   try {
@@ -77,6 +78,12 @@ const api: FileApi = {
   setZoom: (factor) => ipcRenderer.invoke(CHANNEL.setZoom, factor),
   closeWindow: () => ipcRenderer.invoke(CHANNEL.closeWindow),
   appVersion: () => ipcRenderer.invoke(CHANNEL.appVersion),
+  checkUpdates: () => ipcRenderer.invoke(CHANNEL.checkUpdates),
+  downloadUpdate: () => ipcRenderer.invoke(CHANNEL.downloadUpdate),
+  installUpdate: () => void ipcRenderer.send(CHANNEL.installUpdate),
+  onUpdateEvent: (cb) => {
+    updateHandlers.push(cb)
+  },
   onDropFiles: (cb) => {
     dropHandlers.push(cb)
   },
@@ -98,6 +105,11 @@ ipcRenderer.on(CHANNEL.externalChange, (_event, change: ExternalChange) => {
 // 第二个实例带来的新启动参数：主进程已收进 startupPaths，渲染进程重新拉取即可
 ipcRenderer.on(CHANNEL.startupOpen, () => {
   for (const handler of startupHandlers) handler()
+})
+
+// 更新事件：发现新版 / 下载完成 / 下载失败，都交给渲染进程弹应用内对话框
+ipcRenderer.on(CHANNEL.updateEvent, (_event, event: UpdateEvent) => {
+  for (const handler of updateHandlers) handler(event)
 })
 
 // 关闭确认由渲染进程发起：主进程先拦住 close，等我们回答

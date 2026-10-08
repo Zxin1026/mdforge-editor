@@ -5,6 +5,7 @@ import { handleAssetRequests, registerAssetScheme } from './asset-protocol'
 import { attachCloseGuard } from './close-guard'
 import { registerFileHandlers } from './ipc'
 import { registerWindowHandlers } from './window-controls'
+import { initUpdater, registerUpdateHandlers } from './updater'
 import { initDraftStore } from './fs/draft-store'
 import { collectFromArgv } from './fs/startup'
 import { stopAllWatchers } from './fs/watch'
@@ -124,7 +125,9 @@ if (!singleInstance) {
     handleAssetRequests()
     registerFileHandlers(() => mainWindow)
     registerWindowHandlers(() => mainWindow)
+    registerUpdateHandlers()
     createWindow(await readWindowState(STATE_DIR))
+    initUpdater(() => mainWindow)
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow(undefined)
     })

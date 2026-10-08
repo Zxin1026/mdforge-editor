@@ -2,7 +2,7 @@ import './assets/main.css'
 // KaTeX 的样式与字体在入口统一引入：模块内的 css 副作用导入只有 web 配置认得
 import 'katex/dist/katex.min.css'
 import type { AppTheme } from '../../shared/ipc'
-import { appMenus, contextMenuEntries, type AppMenuContext } from './app-menu'
+import { appMenus, contextMenuEntries, handleUpdateEvent, type AppMenuContext } from './app-menu'
 import { openContextMenu } from './context-menu'
 import { dialogOpen } from './dialog'
 import type { MenuHandle } from './menu'
@@ -118,7 +118,11 @@ async function boot(): Promise<void> {
       theme.set(mode)
       workspace.persistSoon()
     },
-    appVersion: () => window.mdforge.appVersion()
+    appVersion: () => window.mdforge.appVersion(),
+    checkUpdates: () => window.mdforge.checkUpdates(),
+    downloadUpdate: () => window.mdforge.downloadUpdate(),
+    installUpdate: () => window.mdforge.installUpdate(),
+    settleForRestart: () => workspace.settleForRestart()
   }
 
   const menus = createMenuBar(document.querySelector<HTMLDivElement>('#menubar')!, appMenus(menuCtx), {
@@ -229,6 +233,8 @@ async function boot(): Promise<void> {
   window.mdforge.onExternalChange((change) => void workspace.handleExternalChange(change))
   // 第二个实例（双击 .md）把新路径交给现有窗口打开
   window.mdforge.onStartupOpen(() => void workspace.openStartupPaths())
+  // 更新事件：发现新版 / 下载完成 / 下载失败 → 应用内对话框
+  window.mdforge.onUpdateEvent((event) => void handleUpdateEvent(event, menuCtx))
 
   // 关闭确认走应用内对话框：主进程先拦住 close，这里回答放不放行
   window.mdforge.onWindowClose(() => void workspace.confirmWindowClose())

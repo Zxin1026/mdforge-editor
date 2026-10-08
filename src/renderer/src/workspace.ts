@@ -1692,6 +1692,38 @@ export class Workspace {
 
   // ---- 关闭确认 ----
 
+  /** 更新重启前：有未保存内容时先走一次保存确认；返回是否放行重启 */
+  async settleForRestart(): Promise<boolean> {
+    if (!this.hasUnsaved()) return true
+    const dirty = this.tabs.filter((tab) => isDirty(tab.state) || isUnsavedNew(tab.state))
+    const choice = await askDialog<CloseChoice>({
+      title: '重启前保存？',
+      body:
+        dirty.length === 1
+          ? `“${displayNameOf(dirty[0].state)}” 有未保存的修改。`
+          : `有 ${dirty.length} 个文档还没保存。`,
+      note: '安装更新会先关闭 MDForge，随后自动回到新版本。',
+      options: [
+        { label: '全部保存并重启', value: 'save', kind: 'default' },
+        { label: '放弃修改并重启', value: 'discard', kind: 'danger' },
+        { label: '取消', value: 'cancel' }
+      ],
+      cancelValue: 'cancel'
+    })
+    if (choice === 'cancel') return false
+    if (choice === 'discard') {
+      // 用户明确放弃，草稿也就没有保留的意义了（与关窗确认同一处理）
+      await window.mdforge.draftClear(dirty.map((tab) => tab.key))
+      return true
+    }
+    for (const tab of [...dirty]) {
+      this.activate(tab.id)
+      await this.save()
+    }
+    // 还有冲突没解决，留在界面里处理
+    return !this.hasUnsaved()
+  }
+
   /** 主进程拦住 close 后问过来的：用应用内确认框决定要不要放行 */
   async confirmWindowClose(): Promise<void> {
     // 主进程没等到回答会隔 20 秒再问一次，已经问过就不再叠第二个框
