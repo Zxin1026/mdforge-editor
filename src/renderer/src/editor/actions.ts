@@ -1,8 +1,9 @@
 import { deleteLine, moveLineDown, moveLineUp, redo, redoDepth, selectAll, undo, undoDepth } from '@codemirror/commands'
 import { findNext, findPrevious, openSearchPanel, replaceAll } from '@codemirror/search'
 import type { EditorView } from '@codemirror/view'
+import { renderBody } from '../export/html'
 import { openFrontMatterEditor } from '../frontmatter-dialog'
-import { boldCmd, headingCmd, inlineCodeCmd, italicCmd, listCmd, quoteCmd, strikeCmd, tableCmd } from './commands'
+import { boldCmd, codeBlockCmd, headingCmd, headingLevelCmd, inlineCodeCmd, italicCmd, listCmd, quoteCmd, strikeCmd, tableCmd, taskToggleCmd } from './commands'
 import { htmlToMarkdown } from './rich-paste'
 
 /**
@@ -33,6 +34,10 @@ export type EditorAction =
   | 'taskList'
   | 'quote'
   | 'table'
+  | 'codeBlock'
+  | 'toggleTask'
+  | 'headingUp'
+  | 'headingDown'
   | 'moveLineUp'
   | 'moveLineDown'
   | 'deleteLine'
@@ -71,6 +76,17 @@ function dispatchWhenAlive(view: EditorView, build: () => Parameters<EditorView[
   view.dispatch(build())
 }
 
+/** 复制/剪切写剪贴板：Markdown 先渲染成 HTML 一起写（粘到 Word / 微信不丢表格与强调），失败退回纯文本 */
+async function writeRichSelection(text: string): Promise<void> {
+  try {
+    const html = await renderBody(text)
+    if (await window.mdforge.clipboardWriteHtml(html, text)) return
+  } catch {
+    /* 富文本准备失败就退回纯文本 */
+  }
+  await window.mdforge.clipboardWriteText(text)
+}
+
 const runners: Record<EditorAction, (view: EditorView) => boolean> = {
   undo: (view) => undo(view),
   redo: (view) => redo(view),
@@ -78,14 +94,14 @@ const runners: Record<EditorAction, (view: EditorView) => boolean> = {
   copy: (view) => {
     const text = selectedText(view)
     if (text === '') return false
-    void window.mdforge.clipboardWriteText(text)
+    void writeRichSelection(text)
     return true
   },
   cut: (view) => {
     const text = selectedText(view)
     if (text === '') return false
-    void window.mdforge.clipboardWriteText(text)
     view.dispatch(view.state.replaceSelection(''), { userEvent: 'delete' })
+    void writeRichSelection(text)
     return true
   },
   paste: (view) => {
@@ -118,6 +134,10 @@ const runners: Record<EditorAction, (view: EditorView) => boolean> = {
   taskList: (view) => listCmd('task')(view),
   quote: (view) => quoteCmd(view),
   table: (view) => tableCmd(view),
+  codeBlock: (view) => codeBlockCmd(view),
+  toggleTask: (view) => taskToggleCmd(view),
+  headingUp: (view) => headingLevelCmd(-1)(view),
+  headingDown: (view) => headingLevelCmd(1)(view),
   moveLineUp: (view) => {
     const moved = moveLineUp(view)
     // 菜单点完不还焦点给编辑器，方向键会继续开着菜单
@@ -151,6 +171,39 @@ const runners: Record<EditorAction, (view: EditorView) => boolean> = {
 
 export function runEditorAction(view: EditorView, action: EditorAction): boolean {
   return runners[action](view)
+}
+
+/**
+ * 键位表（keybindings.ts）里编辑器级命令的运行时实现：
+ * 命令 id → CodeMirror 命令，view.ts 组装 keymap 时按当前绑定取用。
+ */
+export const EDITOR_KEY_COMMANDS: Record<string, (view: EditorView) => boolean> = {
+  bold: boldCmd,
+  italic: italicCmd,
+  strike: strikeCmd,
+  inlineCode: inlineCodeCmd,
+  heading1: headingCmd(1),
+  heading2: headingCmd(2),
+  heading3: headingCmd(3),
+  heading4: headingCmd(4),
+  heading5: headingCmd(5),
+  heading6: headingCmd(6),
+  body: headingCmd(0),
+  bulletList: listCmd('bullet'),
+  orderedList: listCmd('ordered'),
+  taskList: listCmd('task'),
+  quote: quoteCmd,
+  table: tableCmd,
+  codeBlock: codeBlockCmd,
+  toggleTask: taskToggleCmd,
+  headingUp: headingLevelCmd(-1),
+  headingDown: headingLevelCmd(1),
+  moveLineUp: moveLineUp,
+  moveLineDown: moveLineDown,
+  find: (view) => runEditorAction(view, 'find'),
+  replace: (view) => runEditorAction(view, 'replace'),
+  findNext: findNext,
+  findPrevious: findPrevious
 }
 
 export function editorFacts(view: EditorView): EditorFacts {

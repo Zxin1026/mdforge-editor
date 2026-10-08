@@ -1,6 +1,6 @@
 import { syntaxTree } from '@codemirror/language'
-import type { EditorState, Line, TransactionSpec } from '@codemirror/state'
-import type { EditorView, KeyBinding } from '@codemirror/view'
+import { Prec, type EditorState, type Line, type TransactionSpec } from '@codemirror/state'
+import { EditorView } from '@codemirror/view'
 import { compositionField } from './decorations'
 
 type Command = (view: EditorView) => boolean
@@ -245,6 +245,124 @@ function run(view: EditorView, plan: TransactionSpec | null): boolean {
   return true
 }
 
+// ---- 语法转换：代码块 / 任务勾选 / 标题级别 ----
+
+const FENCE = '```'
+
+/** 选区（多光标取最小外框）或光标所在段落（以空行为界，与 view.ts 同口径） */
+function scriptRange(state: EditorState): { from: number; to: number } {
+  if (!state.selection.main.empty) {
+    let from = Number.POSITIVE_INFINITY
+    let to = 0
+    for (const range of state.selection.ranges) {
+      from = Math.min(from, state.doc.lineAt(range.from).from)
+      to = Math.max(to, state.doc.lineAt(range.to).to)
+    }
+    return { from, to }
+  }
+  const line = state.doc.lineAt(state.selection.main.head)
+  let first = line.number
+  while (first > 1 && state.doc.line(first - 1).text.trim() !== '') first -= 1
+  let last = line.number
+  while (last < state.doc.lines && state.doc.line(last + 1).text.trim() !== '') last += 1
+  return { from: state.doc.line(first).from, to: state.doc.line(last).to }
+}
+
+/** 光标所在围栏代码块：不在里面返回 null */
+function fenceAt(state: EditorState, pos: number): { from: number; to: number } | null {
+  let node = syntaxTree(state).resolveInner(Math.min(pos, state.doc.length), -1)
+  while (node && node.name !== 'FencedCode') node = node.parent!
+  return node ? { from: node.from, to: node.to } : null
+}
+
+/** 切换代码块：光标在围栏里就拆掉围栏，否则把选区/当前段落包进围栏。 */
+export function codeBlockPlan(state: EditorState): TransactionSpec | null {
+  const fence = fenceAt(state, state.selection.main.head)
+  if (fence) {
+    const first = state.doc.lineAt(fence.from)
+    const last = state.doc.lineAt(fence.to)
+    return {
+      changes: [
+        { from: first.from, to: Math.min(first.to + 1, state.doc.length) },
+        { from: Math.max(0, last.from - 1), to: last.to }
+      ],
+      selection: { anchor: first.from }
+    }
+  }
+  const range = scriptRange(state)
+  const open = `${FENCE}\n`
+  return {
+    changes: [
+      { from: range.from, insert: open },
+      { from: range.to, insert: `\n${FENCE}` }
+    ],
+    selection: { anchor: range.from + open.length }
+  }
+}
+
+/** 任务勾选切换：任务行翻转 [ ] / [x]；普通列表行升级为任务；行首裸写 []/[x] 规范成任务项。 */
+export function taskTogglePlan(state: EditorState): TransactionSpec | null {
+  const lines = linesTouched(state).filter((line) => !insideCode(state, Math.min(line.from + 1, state.doc.length)))
+  if (lines.length === 0) return null
+  const changes = lines.map((line) => {
+    const p = parseMarkers(line.text)
+    if (p.task) {
+      const flipped = p.listRaw.replace(/\[([ xX])\]/, (_all, mark: string) => (mark === ' ' ? '[x]' : '[ ]'))
+      return { from: line.from, to: line.to, insert: `${p.indent}${p.quote}${flipped}${p.content}` }
+    }
+    if (p.listKind !== '') {
+      return { from: line.from, to: line.to, insert: `${p.indent}${p.quote}${p.listRaw}[ ] ${p.content}` }
+    }
+    const bare = /^([ \t]*(?:>[ \t]?)*)(\[[ xX]?\])([ \t]*)(.*)$/.exec(line.text)
+    if (bare) {
+      return { from: line.from, to: line.to, insert: `${bare[1]}- [${/x/i.test(bare[2]) ? 'x' : ' '}] ${bare[4]}` }
+    }
+    return { from: line.from, to: line.to, insert: `${p.indent}${p.quote}- [ ] ${p.content}` }
+  })
+  return { changes }
+}
+
+/** 标题级别加减（delta=1 降一级、-1 升一级），只动标题行，级别夹在 1–6。 */
+export function headingLevelPlan(state: EditorState, delta: 1 | -1): TransactionSpec | null {
+  let touched = false
+  const changes = linesTouched(state).map((line) => {
+    const parsed = /^([ \t]*)(#{1,6})([ \t]+)(.*)$/.exec(line.text)
+    if (!parsed) return { from: line.from, to: line.to, insert: line.text }
+    const level = Math.min(6, Math.max(1, parsed[2].length + delta))
+    if (level === parsed[2].length) return { from: line.from, to: line.to, insert: line.text }
+    touched = true
+    return { from: line.from, to: line.to, insert: `${parsed[1]}${'#'.repeat(level)}${parsed[3]}${parsed[4]}` }
+  })
+  return touched ? { changes } : null
+}
+
+/**
+ * Typora 式的输入即转：行首敲出 [] / [x] / 中文序号（1、或 1））后按空格，
+ * 就地变成任务列表或有序列表的标记，键盘流不用回头补语法。
+ */
+export const smartListInput = Prec.high(
+  EditorView.inputHandler.of((view, from, to, insert) => {
+    if (from !== to || view.composing || view.state.readOnly) return false
+    if (insert !== ' ' && insert !== '　') return false
+    const state = view.state
+    const line = state.doc.lineAt(from)
+    const before = state.sliceDoc(line.from, from)
+    const task = /^([ \t]*)\[([ xX]?)\]$/.exec(before)
+    let next: string | null = task ? `${task[1]}- [${/x/i.test(task[2]) ? 'x' : ' '}] ` : null
+    if (next === null) {
+      const ordered = /^([ \t]*)(\d{1,9})[、）]$/.exec(before)
+      if (ordered) next = `${ordered[1]}${ordered[2]}. `
+    }
+    if (next === null || insideCode(state, from)) return false
+    view.dispatch({
+      changes: { from: line.from, to: from, insert: next },
+      selection: { anchor: line.from + next.length },
+      userEvent: 'input.type'
+    })
+    return true
+  })
+)
+
 export const boldCmd: Command = (view) => run(view, toggleWrapPlan(view.state, '**', '**'))
 export const italicCmd: Command = (view) => run(view, toggleWrapPlan(view.state, '*', '*'))
 export const strikeCmd: Command = (view) => run(view, toggleWrapPlan(view.state, '~~', '~~'))
@@ -260,29 +378,15 @@ export function listCmd(kind: ListKind): Command {
 
 export const quoteCmd: Command = (view) => run(view, quotePlan(view.state))
 export const tableCmd: Command = (view) => run(view, tablePlan(view.state))
+export const codeBlockCmd: Command = (view) => run(view, codeBlockPlan(view.state))
+export const taskToggleCmd: Command = (view) => run(view, taskTogglePlan(view.state))
+
+export function headingLevelCmd(delta: 1 | -1): Command {
+  return (view) => run(view, headingLevelPlan(view.state, delta))
+}
 
 /** IME 合成期间的回车用于确认候选词，不能触发列表续写。 */
-const enterCmd: Command = (view) => {
+export const enterCmd: Command = (view) => {
   if (view.state.field(compositionField).composing) return false
   return run(view, enterPlan(view.state))
 }
-
-export const markdownKeymap: KeyBinding[] = [
-  { key: 'Mod-b', run: boldCmd, preventDefault: true },
-  { key: 'Mod-i', run: italicCmd, preventDefault: true },
-  { key: 'Mod-Shift-x', run: strikeCmd, preventDefault: true },
-  { key: 'Mod-`', run: inlineCodeCmd, preventDefault: true },
-  { key: 'Mod-1', run: headingCmd(1), preventDefault: true },
-  { key: 'Mod-2', run: headingCmd(2), preventDefault: true },
-  { key: 'Mod-3', run: headingCmd(3), preventDefault: true },
-  { key: 'Mod-4', run: headingCmd(4), preventDefault: true },
-  { key: 'Mod-5', run: headingCmd(5), preventDefault: true },
-  { key: 'Mod-6', run: headingCmd(6), preventDefault: true },
-  { key: 'Mod-0', run: headingCmd(0), preventDefault: true },
-  { key: 'Mod-Shift-l', run: listCmd('bullet'), preventDefault: true },
-  { key: 'Mod-Shift-o', run: listCmd('ordered'), preventDefault: true },
-  { key: 'Mod-Shift-t', run: listCmd('task'), preventDefault: true },
-  { key: 'Mod-Shift-q', run: quoteCmd, preventDefault: true },
-  { key: 'Mod-Alt-t', run: tableCmd, preventDefault: true },
-  { key: 'Enter', run: enterCmd }
-]

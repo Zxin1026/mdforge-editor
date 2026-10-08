@@ -82,6 +82,33 @@ describe('工作区搜索', () => {
     expect(result.files.map((file) => file.name)).toEqual(['visible.md'])
   })
 
+  it('过滤串按 glob 收窄文件：包含、排除与目录通配', async () => {
+    put('a.md', 'needle\n')
+    put('b.txt', 'needle\n')
+    put('draft/c.md', 'needle\n')
+    put('notes/deep/d.md', 'needle\n')
+
+    const onlyMd = await searchWorkspace({ dir: root, query: 'needle', caseSensitive: false, regex: false, filter: '*.md' })
+    expect(onlyMd.files.map((file) => file.name).sort()).toEqual(['a.md', 'c.md', 'd.md'])
+
+    const noDraft = await searchWorkspace({ dir: root, query: 'needle', caseSensitive: false, regex: false, filter: '!draft/**' })
+    expect(noDraft.files.map((file) => file.name).sort()).toEqual(['a.md', 'b.txt', 'd.md'])
+
+    const notesOnly = await searchWorkspace({ dir: root, query: 'needle', caseSensitive: false, regex: false, filter: 'notes/**' })
+    expect(notesOnly.files.map((file) => file.name)).toEqual(['d.md'])
+    expect(notesOnly.scanned).toBe(1)
+
+    const combined = await searchWorkspace({ dir: root, query: 'needle', caseSensitive: false, regex: false, filter: '**/*.md, !draft/**' })
+    expect(combined.files.map((file) => file.name).sort()).toEqual(['a.md', 'd.md'])
+  })
+
+  it('过滤串只写了排除项时，其余文件仍然参与搜索', async () => {
+    put('keep.md', 'needle\n')
+    put('skip/x.md', 'needle\n')
+    const result = await searchWorkspace({ dir: root, query: 'needle', caseSensitive: false, regex: false, filter: '!skip/**' })
+    expect(result.files.map((file) => file.name)).toEqual(['keep.md'])
+  })
+
   it('未授权的文件夹拒绝搜索', async () => {
     resetFileStore()
     await expect(searchWorkspace({ dir: root, query: 'x', caseSensitive: false, regex: false })).rejects.toThrow(

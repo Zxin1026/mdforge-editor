@@ -36,12 +36,15 @@ export function createSearchView(deps: SearchViewDeps): SearchView {
   let noteError = false
   let result: WorkspaceSearchResult | null = null
   let lastQuery = ''
+  /** 路径过滤串（逗号分隔的 glob，! 为排除），随输入即时生效 */
+  let pathFilter = ''
 
   // 与文件树同理：渲染只动自己的容器，避免把面板里别的页抹掉
   let box: HTMLElement | null = null
 
   let queryInput: HTMLInputElement | null = null
   let replaceInput: HTMLInputElement | null = null
+  let filterInput: HTMLInputElement | null = null
 
   function render(): void {
     if (box === null) return
@@ -107,7 +110,29 @@ export function createSearchView(deps: SearchViewDeps): SearchView {
     replaceBtn.addEventListener('click', () => void runReplace())
     replaceRow.append(replaceInput, runBtn, replaceBtn)
 
-    box.append(head, replaceRow)
+    // 文件类型过滤：只扫匹配的文件，! 前缀排除；空串=不过滤
+    const filterRow = document.createElement('div')
+    filterRow.className = 'search-head'
+    filterInput = document.createElement('input')
+    filterInput.type = 'text'
+    filterInput.className = 'search-input'
+    filterInput.placeholder = '过滤：*.md, !draft/**'
+    filterInput.title = '按路径过滤文件：逗号分隔的 glob，* 单层、** 跨目录，! 前缀表示排除'
+    filterInput.spellcheck = false
+    filterInput.value = pathFilter
+    filterInput.disabled = deps.folderRoot() === null
+    filterInput.addEventListener('input', () => {
+      pathFilter = filterInput?.value ?? ''
+    })
+    filterInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        void run()
+      }
+    })
+    filterRow.append(filterInput)
+
+    box.append(head, replaceRow, filterRow)
 
     if (deps.folderRoot() === null) {
       const empty = document.createElement('div')
@@ -258,7 +283,7 @@ export function createSearchView(deps: SearchViewDeps): SearchView {
     note = '正在搜索…'
     noteError = false
     render()
-    const response = await deps.search({ dir, query, caseSensitive, regex })
+    const response = await deps.search({ dir, query, caseSensitive, regex, filter: pathFilter })
     running = false
     if (response.ok) {
       result = response.value

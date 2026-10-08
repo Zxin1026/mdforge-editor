@@ -8,10 +8,11 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { codeFolding, foldGutter, foldKeymap, syntaxHighlighting } from '@codemirror/language'
 import { search, searchKeymap } from '@codemirror/search'
 import { Compartment, EditorState, Prec, Transaction, type Extension } from '@codemirror/state'
-import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
+import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type KeyBinding, type ViewUpdate } from '@codemirror/view'
 import type { FileErrorInfo } from '../../../shared/ipc'
 import { createSlugger } from '../../../shared/slug'
-import { markdownKeymap } from './commands'
+import { KEY_COMMANDS, effectiveKey, toCmKey } from '../keybindings'
+import { enterCmd, smartListInput } from './commands'
 import { compositionEvents, compositionField, markdownDecorations, themeChanged } from './decorations'
 import { docPathField, setDocPath } from './doc-path'
 import { frontMatterCollapsed } from './frontmatter'
@@ -24,7 +25,7 @@ import { imagePaste } from './paste-image'
 import { richPaste } from './rich-paste'
 import { collectOutline } from './outline'
 import { computeStatus, type StatusInfo } from './status'
-import { editorFacts, runEditorAction, type EditorAction, type EditorFacts } from './actions'
+import { EDITOR_KEY_COMMANDS, editorFacts, runEditorAction, type EditorAction, type EditorFacts } from './actions'
 
 export interface MarkdownEditor {
   text(): string
@@ -50,6 +51,8 @@ export interface MarkdownEditor {
   /** 菜单入口：复用与快捷键相同的命令表 */
   run(action: EditorAction): boolean
   facts(): EditorFacts
+  /** 键位表变了：按新的绑定重建编辑器 keymap */
+  setKeybindings(): void
   /** 源代码模式：只摘掉行内渲染装饰，正文语法高亮与查找照旧 */
   setSourceMode(on: boolean): void
   sourceMode(): boolean
@@ -160,6 +163,41 @@ const backtickGuard = Prec.high(
   })
 )
 
+/**
+ * 这些内置键位已由键位表接管：基础 keymap 里摘掉它们，
+ * 用户把命令换绑或解绑后，旧键才不会继续触发内置行为。
+ * （Alt+左右是导航历史；CM 默认把它们派给光标语法移动，会把后退吃掉。）
+ */
+const MANAGED_BUILTIN_KEYS = new Set([
+  'Mod-f',
+  'F3',
+  'Mod-g',
+  'Mod-Shift-l',
+  'Alt-ArrowUp',
+  'Alt-ArrowDown',
+  'Alt-ArrowLeft',
+  'Alt-ArrowRight'
+])
+
+function withoutManagedKeys(list: readonly KeyBinding[]): KeyBinding[] {
+  return list.filter((binding) => binding.key === undefined || !MANAGED_BUILTIN_KEYS.has(binding.key))
+}
+
+/** 键位表 → CodeMirror keymap；换绑时重配 keysComp 一个 compartment 即可 */
+function buildEditorKeymap(): KeyBinding[] {
+  const bindings: KeyBinding[] = []
+  for (const command of KEY_COMMANDS) {
+    if (command.scope !== 'editor') continue
+    const key = effectiveKey(command.id)
+    const run = EDITOR_KEY_COMMANDS[command.id]
+    if (key === null || run === undefined) continue
+    bindings.push({ key: toCmKey(key), run, preventDefault: true })
+  }
+  // Enter 的列表续写不参与换绑：它要排在默认换行行为之前
+  bindings.push({ key: 'Enter', run: enterCmd })
+  return bindings
+}
+
 export function createEditor(
   mount: HTMLElement,
   onChange: (text: string) => void,
@@ -206,6 +244,7 @@ export function createEditor(
   const typewriterComp = new Compartment()
   const focusComp = new Compartment()
   const readComp = new Compartment()
+  const keysComp = new Compartment()
   let source = false
   let typewriterOn = false
   let focusOn = false
@@ -233,6 +272,8 @@ export function createEditor(
     foldGutter(),
     // 括号配对 + 补全：markdown 自带 HTML 标签补全，代码块内按 language-data 的语言补全
     backtickGuard,
+    // 行首 [] / 1、后按空格：输入即转任务列表 / 有序列表（Typora 键盘流）
+    smartListInput,
     bracketPairing,
     closeBrackets(),
     autocompletion(),
@@ -240,8 +281,15 @@ export function createEditor(
     // 图片之后接管：带 HTML 的剪贴板先转成 Markdown，纯文本仍走默认行为
     richPaste(),
     // markdown 命令在前：Enter 只在列表/引用里续写，其余交回默认换行
-    keymap.of(markdownKeymap),
-    keymap.of([...defaultKeymap, ...historyKeymap, ...closeBracketsKeymap, ...foldKeymap, indentWithTab, ...searchKeymap]),
+    keysComp.of(keymap.of(buildEditorKeymap())),
+    keymap.of([
+      ...withoutManagedKeys(defaultKeymap),
+      ...historyKeymap,
+      ...closeBracketsKeymap,
+      ...foldKeymap,
+      indentWithTab,
+      ...withoutManagedKeys(searchKeymap)
+    ]),
     EditorView.domEventHandlers({
       mousedown: (event) => openLink(event),
       mousemove: (event) => hover.move(event, targetAt),
@@ -315,6 +363,9 @@ export function createEditor(
     focus: () => view.focus(),
     run: (action) => runEditorAction(view, action),
     facts: () => editorFacts(view),
+    setKeybindings: () => {
+      view.dispatch({ effects: keysComp.reconfigure(keymap.of(buildEditorKeymap())) })
+    },
     setSourceMode: (on) => {
       if (on === source) return
       source = on

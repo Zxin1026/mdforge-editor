@@ -1,10 +1,11 @@
 import { createAssetsView, type AssetsView, type AssetsViewDeps } from './side/assets-view'
 import { createFilesView, type FilesViewDeps } from './side/files-view'
 import { createSearchView, type SearchViewDeps } from './side/search-view'
+import { aggregateTags, docsForTag, filterTags, type TagDoc } from './side/tags-logic'
 import { ISSUE_TITLES, KIND_ORDER, type InspectReport, type Issue } from './editor/inspect'
 import { activeIndex, outlineGuides, type OutlineItem } from './editor/outline'
 
-export type SideMode = 'files' | 'outline' | 'search' | 'links' | 'assets' | 'issues'
+export type SideMode = 'files' | 'outline' | 'search' | 'links' | 'tags' | 'assets' | 'issues'
 
 /** 反向链接页的数据：当前文档 + 指向它的其他文档 */
 export interface LinksView {
@@ -17,6 +18,16 @@ export interface LinksView {
   totalDocs: number
   totalLinks: number
   backlinks: Array<{ path: string; name: string; line: number; text: string }>
+}
+
+/** 标签页的数据：文件夹里有标签的文档（计数与筛选在面板侧做） */
+export interface TagsView {
+  dir: string | null
+  loading: boolean
+  error: string | null
+  docs: TagDoc[]
+  /** 索引里一共扫描到多少个文档 */
+  totalDocs: number
 }
 
 export interface SidePanel {
@@ -39,6 +50,8 @@ export interface SidePanel {
   syncFavorites(): void
   /** 反向链接页 */
   renderLinks(view: LinksView): void
+  /** 标签页 */
+  renderTags(view: TagsView): void
   /** 图片页：当前文档的缺图引用（定位用） */
   renderAssetIssues(issues: readonly Issue[]): void
   /** Ctrl+Shift+F：切到搜索页并聚焦输入框 */
@@ -58,6 +71,9 @@ interface Handlers {
   onPickBacklink(path: string, line: number): void
   onRefreshLinks(): void
   onOpenGraph(): void
+  /** 标签页：点开某个文档 */
+  onPickTagDoc(path: string): void
+  onRefreshTags(): void
 }
 
 /** 右侧面板：文件树、大纲、工作区搜索与反向链接共用一个栏位 */
@@ -65,6 +81,10 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
   let mode: SideMode = 'outline'
   let lastReport: InspectReport | null = null
   let lastLinks: LinksView | null = null
+  let lastTags: TagsView | null = null
+  /** 标签页的本地状态：选中的标签与过滤词 */
+  let activeTag: string | null = null
+  let tagFilter = ''
   let stale = false
 
   const filesView = createFilesView({
@@ -85,8 +105,9 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
   const outlineTab = tab('outline', '大纲')
   const searchTab = tab('search', '搜索')
   const linksTab = tab('links', '链接')
+  const tagsTab = tab('tags', '标签')
   const assetsTab = tab('assets', '图片')
-  tabs.append(filesTab, outlineTab, searchTab, linksTab, assetsTab)
+  tabs.append(filesTab, outlineTab, searchTab, linksTab, tagsTab, assetsTab)
 
   function tab(which: SideMode, label: string): HTMLButtonElement {
     const button = document.createElement('button')
@@ -110,6 +131,7 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
       ['outline', outlineTab],
       ['search', searchTab],
       ['links', linksTab],
+      ['tags', tagsTab],
       ['assets', assetsTab]
     ] as const) {
       tabEl.classList.toggle('is-active', mode === which)
@@ -122,6 +144,7 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
     if (mode === 'files') filesView.mount(body)
     else if (mode === 'search') searchView.mount(body)
     else if (mode === 'links') renderLinksBody()
+    else if (mode === 'tags') renderTagsBody(false)
     else if (mode === 'assets') assetsView.mount(body)
     else if (mode === 'issues') renderIssuesBody(lastReport, false)
   }
@@ -222,6 +245,136 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
       list.appendChild(item)
     }
     body.replaceChildren(head, counts, list)
+  }
+
+  function renderTagsBody(keepFilterFocus: boolean): void {
+    const view = lastTags
+    const nodes: HTMLElement[] = []
+
+    const head = document.createElement('div')
+    head.className = 'issues-head'
+    const summary = document.createElement('span')
+    summary.className = 'tags-summary'
+    summary.dataset.role = 'tags-summary'
+    const aggregate = aggregateTags(view?.docs ?? [])
+    summary.textContent = view === null || view.dir === null ? '标签' : `${aggregate.length} 个标签 · ${view.docs.length} 篇文档`
+    const refresh = document.createElement('button')
+    refresh.type = 'button'
+    refresh.className = 'issues-run'
+    refresh.textContent = '刷新'
+    refresh.dataset.action = 'tags-refresh'
+    refresh.disabled = view === null || view.loading || view.dir === null
+    refresh.addEventListener('click', handlers.onRefreshTags)
+    head.append(summary, refresh)
+    nodes.push(head)
+
+    if (view === null || view.dir === null) {
+      nodes.push(note('打开文件夹后，这里会按 front matter 的 tags / keywords 汇总标签'))
+      body.replaceChildren(...nodes)
+      return
+    }
+    if (view.loading) {
+      nodes.push(note('正在扫描文件夹里的标签…'))
+      body.replaceChildren(...nodes)
+      return
+    }
+    if (view.error !== null) {
+      nodes.push(note(view.error, true))
+      body.replaceChildren(...nodes)
+      return
+    }
+    if (view.docs.length === 0) {
+      nodes.push(note('文件夹里还没有带标签的文档：在 front matter 里写 tags: [笔记, 教程]，或在「文档信息」里填写标签'))
+      nodes.push(note(`本次扫描了 ${view.totalDocs} 个文档`))
+      body.replaceChildren(...nodes)
+      return
+    }
+
+    const filter = document.createElement('input')
+    filter.type = 'text'
+    filter.className = 'search-input'
+    filter.placeholder = '按标签名过滤'
+    filter.dataset.role = 'tags-filter'
+    filter.spellcheck = false
+    filter.value = tagFilter
+    filter.addEventListener('input', () => {
+      tagFilter = filter.value
+      renderTagsBody(true)
+    })
+    nodes.push(filter)
+
+    const visible = filterTags(aggregate, tagFilter)
+    if (visible.length === 0) {
+      nodes.push(note(`没有匹配「${tagFilter.trim()}」的标签`))
+    } else {
+      const cloud = document.createElement('div')
+      cloud.className = 'tags-cloud'
+      for (const item of visible) {
+        const chip = document.createElement('button')
+        chip.type = 'button'
+        chip.className = `tag-item${activeTag !== null && activeTag.toLowerCase() === item.tag.toLowerCase() ? ' is-active' : ''}`
+        chip.dataset.tag = item.tag
+        chip.title = `筛选带「${item.tag}」标签的文档`
+        const name = document.createElement('span')
+        name.className = 'tag-name'
+        name.textContent = item.tag
+        const count = document.createElement('span')
+        count.className = 'tag-count'
+        count.textContent = String(item.count)
+        chip.append(name, count)
+        chip.addEventListener('click', () => {
+          const same = activeTag !== null && activeTag.toLowerCase() === item.tag.toLowerCase()
+          activeTag = same ? null : item.tag
+          renderTagsBody(false)
+        })
+        cloud.appendChild(chip)
+      }
+      nodes.push(cloud)
+    }
+
+    if (activeTag !== null) {
+      const docs = docsForTag(view.docs, activeTag)
+      const groupHead = document.createElement('div')
+      groupHead.className = 'issue-group-head'
+      groupHead.textContent = `「${activeTag}」的文档 ${docs.length}`
+      groupHead.dataset.role = 'tags-doc-head'
+      nodes.push(groupHead)
+      const list = document.createElement('div')
+      list.className = 'link-list'
+      for (const doc of docs) {
+        const item = document.createElement('button')
+        item.type = 'button'
+        item.className = 'link-item'
+        item.dataset.tagDocPath = doc.path
+        const name = document.createElement('div')
+        name.className = 'link-name'
+        name.textContent = doc.name
+        const detail = document.createElement('div')
+        detail.className = 'link-detail'
+        detail.textContent = doc.tags.map((tag) => `#${tag}`).join(' ')
+        detail.title = doc.path
+        item.append(name, detail)
+        item.addEventListener('click', () => handlers.onPickTagDoc(doc.path))
+        list.appendChild(item)
+      }
+      nodes.push(list)
+    } else {
+      nodes.push(note('点一个标签，查看带它的文档'))
+    }
+
+    body.replaceChildren(...nodes)
+    if (keepFilterFocus) {
+      const again = body.querySelector<HTMLInputElement>('[data-role="tags-filter"]')
+      again?.focus()
+      again?.setSelectionRange(again.value.length, again.value.length)
+    }
+  }
+
+  function note(text: string, isError = false): HTMLElement {
+    const line = document.createElement('div')
+    line.className = `files-note${isError ? ' is-error' : ''}`
+    line.textContent = text
+    return line
   }
 
   function renderOutlineBody(items: readonly OutlineItem[], line: number): void {
@@ -372,6 +525,10 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
     renderLinks(view) {
       lastLinks = view
       if (mode === 'links') renderLinksBody()
+    },
+    renderTags(view) {
+      lastTags = view
+      if (mode === 'tags') renderTagsBody(false)
     },
     renderAssetIssues(issues) {
       assetsView.setMissing(issues)

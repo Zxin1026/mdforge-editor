@@ -11,7 +11,7 @@ import {
   FRONT_MATTER_FIELDS,
   parseFrontMatter,
   readFields
-} from './editor/frontmatter-yaml'
+} from '../../shared/frontmatter-yaml'
 
 function normalizeBlock(text: string): string {
   const lines = text.replace(/\r\n/g, '\n').split('\n')

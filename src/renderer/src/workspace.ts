@@ -6,9 +6,13 @@ import {
   DEFAULT_FONT_SIZE,
   ENCODING_CHOICES,
   PAPER_SIZES,
+  SIDEBAR_WIDTH_DEFAULT,
+  SPLIT_RATIO_DEFAULT,
   customRefOf,
   normalizeContentWidth,
   normalizeFontSize,
+  normalizeSidebarWidth,
+  normalizeSplitRatio,
   normalizeViewMode,
   normalizeZoom,
   type AppTheme,
@@ -30,11 +34,14 @@ import {
   type FileSnapshot,
   type LinkIndexResult,
   type PageTemplate,
+  type TagIndexResult,
   type ViewMode
 } from '../../shared/ipc'
 import type { EditorAction, EditorFacts } from './editor/actions'
 import type { LinkTarget } from './editor/links'
 import { askDialog } from './dialog'
+import { chooseDocTemplate } from './doc-template-dialog'
+import { renderTemplate } from './doc-templates'
 import { refRewriteEdits } from './asset-refs'
 import { collectOutline } from './editor/outline'
 import { clearMermaidCache } from './editor/mermaid'
@@ -54,6 +61,8 @@ import {
   themeLabel
 } from './export/options'
 import { buildHtml, deriveTitle, renderBody, renderText } from './export/html'
+import { buildDocx } from './export/docx'
+import { buildOpml } from './export/opml'
 import { buildSitePlan } from './export/site'
 import {
   cssForRef,
@@ -64,12 +73,14 @@ import {
   themeRefExists
 } from './export/style-lib'
 import { openStyleManager } from './style-manager'
-import { frontMatterTextOf, parseFrontMatter, readFields } from './editor/frontmatter-yaml'
+import { frontMatterTextOf, parseFrontMatter, readFields } from '../../shared/frontmatter-yaml'
 import type { MenuEntry, MenuHandle } from './menu'
 import { openMenu } from './menu'
-import { createSidePanel, type LinksView, type SidePanel } from './side-panel'
+import { createSidePanel, type LinksView, type SidePanel, type TagsView } from './side-panel'
 import type { ReplaceRequest } from './side/search-view'
 import { inspectDocument, type InspectSource, type Issue } from './editor/inspect'
+import { keybindingsSnapshot, loadKeybindings, onKeybindingChange } from './keybindings'
+import { applySidebarWidth, applySplitRatio, bindSidebarResizer } from './panes'
 import { createSplitPreview, themeForApp, type SplitPreview } from './split-preview'
 import { currentTheme } from './editor/theme-runtime'
 import { createTabBar, type TabBar, type TabItem } from './tabs'
@@ -92,6 +103,10 @@ export interface WorkspaceDeps {
   editorHost: HTMLElement
   tabbar: HTMLElement
   outline: HTMLElement
+  /** 侧边栏分隔条的拖拽把手（宽度拖动用） */
+  sidebarResizer: HTMLElement
+  /** 主区容器：算侧边栏宽度时量它的左缘 */
+  paneBody: HTMLElement
   nameEl: HTMLElement
   metaEl: HTMLElement
   autoSaveEl: HTMLElement
@@ -132,7 +147,7 @@ const ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
 type ConflictChoice = 'reload' | 'overwrite' | 'later'
 type CloseChoice = 'save' | 'discard' | 'cancel'
 type ExternalChoice = 'reload' | 'keep' | 'later'
-type ExportKind = 'html' | 'pdf' | 'md' | 'txt'
+type ExportKind = 'html' | 'pdf' | 'md' | 'txt' | 'docx' | 'opml'
 
 export class Workspace {
   private tabs: DocTab[] = []
@@ -164,6 +179,9 @@ export class Workspace {
   /** 链接索引缓存：目录与内容都没变时反链/关系图直接复用 */
   private linkIndex: LinkIndexResult | null = null
   private linkIndexDir: string | null = null
+  /** 标签索引缓存：口径同链接索引 */
+  private tagsIndex: TagIndexResult | null = null
+  private tagsIndexDir: string | null = null
   /** 导航历史：后退/前进的站点栈 */
   private navStack: NavPoint[] = []
   private navIndex = -1
@@ -172,6 +190,9 @@ export class Workspace {
   private typewriterOn = false
   private focusOn = false
   private sourceOn = false
+  /** 面板宽度：侧边栏像素宽与分屏右栏占比，都能拖 */
+  private sidebarWidth = SIDEBAR_WIDTH_DEFAULT
+  private splitRatio = SPLIT_RATIO_DEFAULT
   private readonly preview: SplitPreview
 
   private readonly tabs_: TabBar
@@ -181,7 +202,17 @@ export class Workspace {
   private lintTimer: number | undefined
 
   constructor(private readonly deps: WorkspaceDeps) {
-    this.preview = createSplitPreview(deps.editorHost)
+    this.preview = createSplitPreview(deps.editorHost, {
+      onRatio: (ratio, final) => this.setSplitRatio(ratio, final)
+    })
+    bindSidebarResizer(deps.sidebarResizer, deps.paneBody, {
+      onWidth: (px, final) => this.setSidebarWidth(px, final)
+    })
+    // 键位变了：所有编辑器的 keymap 重配，并把新覆盖写进会话
+    onKeybindingChange(() => {
+      for (const tab of this.tabs) tab.editor.setKeybindings()
+      this.schedulePersist()
+    })
     this.tabs_ = createTabBar(deps.tabbar, {
       onSelect: (id) => this.activate(id),
       onClose: (id) => void this.close(id),
@@ -198,6 +229,7 @@ export class Workspace {
         if (mode === 'issues') void this.runCheck(true)
         else if (mode === 'outline') this.updateOutline()
         else if (mode === 'links') void this.refreshBacklinks(false)
+        else if (mode === 'tags') void this.refreshTags(false)
       },
       onPickFile: (path) => void this.openPath(path),
       onOpenFolder: () => void this.openFolderViaDialog(),
@@ -226,6 +258,8 @@ export class Workspace {
       onPickBacklink: (path, line) => void this.openHit(path, line, 1, 0),
       onRefreshLinks: () => void this.refreshBacklinks(true),
       onOpenGraph: () => void this.showGraph(),
+      onPickTagDoc: (path) => void this.openPath(path),
+      onRefreshTags: () => void this.refreshTags(true),
       assets: {
         root: () => this.assetRoot(),
         rootLabel: () => {
@@ -242,6 +276,7 @@ export class Workspace {
             .map((tab) => tab.state.path as string),
         syncAfterWrite: (touched) => void this.syncAfterAssetWrite(touched),
         readAsset: (path) => window.mdforge.readAsset(path),
+        copyImage: (bytes) => window.mdforge.clipboardWriteImage(bytes),
         activeDocPath: () => this.active()?.state.path ?? null,
         locate: (line) => this.locateInActive(line),
         reveal: (path) => this.revealPath(path),
@@ -357,6 +392,16 @@ export class Workspace {
     tab.editor.focus()
   }
 
+  /** 文件 → 从模板新建…：挑一个骨架，正文填好日期占位符后开一个新标签 */
+  async openNewFromTemplate(): Promise<void> {
+    const template = await chooseDocTemplate()
+    if (template === null) return
+    const tab = this.createTab({ ...emptyDoc(), text: renderTemplate(template) })
+    this.activate(tab.id)
+    tab.editor.focus()
+    this.setMessage(`已从模板新建：${template.name}`)
+  }
+
   async close(id: string): Promise<boolean> {
     const index = this.tabs.findIndex((tab) => tab.id === id)
     if (index < 0) return false
@@ -416,6 +461,7 @@ export class Workspace {
     // 检查结果与反向链接都跟着当前文档走（静默检查：不在面板上闪"正在检查"）
     void this.runCheck(false)
     if (this.side_.mode() === 'links') void this.refreshBacklinks(false)
+    else if (this.side_.mode() === 'tags') void this.refreshTags(false)
   }
 
   // ---- 写盘 / 导出 ----
@@ -499,6 +545,8 @@ export class Workspace {
     this.folderRoot = result.value
     this.linkIndex = null
     this.linkIndexDir = null
+    this.tagsIndex = null
+    this.tagsIndexDir = null
     this.setSidebarVisible(true)
     this.side_.setMode('files')
     this.side_.setFolderRoot(result.value)
@@ -524,6 +572,7 @@ export class Workspace {
       return false
     }
     this.linkIndex = null
+    this.tagsIndex = null
     this.setMessage(`已新建文件夹：${baseNameOf(result.value)}`)
     return true
   }
@@ -537,6 +586,8 @@ export class Workspace {
     }
     this.linkIndex = null
     this.linkIndexDir = null
+    this.tagsIndex = null
+    this.tagsIndexDir = null
     this.setMessage(`已新建：${baseNameOf(result.value)}`)
     await this.openPath(result.value)
     return true
@@ -571,6 +622,8 @@ export class Workspace {
     this.favorites = this.favorites.filter((item) => !this.underPath(item, path))
     this.linkIndex = null
     this.linkIndexDir = null
+    this.tagsIndex = null
+    this.tagsIndexDir = null
     this.side_.syncFavorites()
     await this.side_.reloadFiles()
     this.schedulePersist()
@@ -624,6 +677,7 @@ export class Workspace {
     this.recents = this.recents.map((path) => (affected(path) ? rewrite(path) : path))
     this.favorites = this.favorites.map((path) => (affected(path) ? rewrite(path) : path))
     this.linkIndex = null
+    this.tagsIndex = null
     this.side_.syncFavorites()
     this.refreshChrome()
     this.schedulePersist()
@@ -805,6 +859,7 @@ export class Workspace {
 
     const outcome = response.value
     this.linkIndex = null
+    this.tagsIndex = null
     const replacedPaths = new Set(
       outcome.files.filter((file) => file.replaced > 0).map((file) => file.path.toLowerCase())
     )
@@ -899,6 +954,45 @@ export class Workspace {
     })
   }
 
+  // ---- 标签页 ----
+
+  /** 标签索引按需扫描；目录没变时复用缓存 */
+  private async ensureTagIndex(force: boolean): Promise<TagIndexResult | null> {
+    const dir = this.folderRoot
+    if (dir === null) return null
+    if (!force && this.tagsIndex !== null && this.tagsIndexDir === dir) return this.tagsIndex
+    const result = await window.mdforge.scanTags(dir)
+    if (!result.ok) {
+      this.notify(result.error)
+      return null
+    }
+    this.tagsIndex = result.value
+    this.tagsIndexDir = dir
+    return result.value
+  }
+
+  async refreshTags(force: boolean): Promise<void> {
+    const dir = this.folderRoot
+    const base: TagsView = { dir, loading: dir !== null, error: null, docs: [], totalDocs: 0 }
+    this.side_.renderTags(base)
+    if (dir === null) {
+      this.side_.renderTags({ ...base, loading: false })
+      return
+    }
+    const index = await this.ensureTagIndex(force)
+    if (index === null) {
+      this.side_.renderTags({ ...base, loading: false, error: this.lastError?.message ?? '标签扫描失败' })
+      return
+    }
+    this.side_.renderTags({
+      dir,
+      loading: false,
+      error: null,
+      docs: index.docs.map((doc) => ({ path: doc.path, name: doc.name, tags: doc.tags })),
+      totalDocs: index.files.length
+    })
+  }
+
   // ---- 导航历史 ----
 
   /** 把当前位置压进历史（打字不动光标则不重复记录）；从中间出发会砍掉前进分支 */
@@ -979,6 +1073,27 @@ export class Workspace {
     this.deps.outline.classList.toggle('is-hidden', !this.sidebarOn)
   }
 
+  // ---- 面板宽度：侧边栏与分屏都能拖 ----
+
+  setSidebarWidth(px: number, persist: boolean): void {
+    const next = normalizeSidebarWidth(px)
+    if (next === undefined) return
+    // 收尾那一拍（final）时值往往与拖动中相同，持久化必须先于去重判断
+    if (persist) this.schedulePersist()
+    if (next === this.sidebarWidth) return
+    this.sidebarWidth = next
+    applySidebarWidth(next)
+  }
+
+  setSplitRatio(ratio: number, persist: boolean): void {
+    const next = normalizeSplitRatio(ratio)
+    if (next === undefined) return
+    if (persist) this.schedulePersist()
+    if (next === this.splitRatio) return
+    this.splitRatio = next
+    applySplitRatio(next)
+  }
+
   // ---- 导出 ----
 
   /** 菜单栏"文件 → 导出"浮层用的条目；导出动作会关掉菜单，设置页不收 */
@@ -986,8 +1101,10 @@ export class Workspace {
     return [
       { label: '导出 HTML…', run: () => void this.runExport('html') },
       { label: '导出 PDF…', run: () => void this.runExport('pdf') },
+      { label: '导出 Word (DOCX)…', hint: '标题层级、列表、表格与图片', run: () => void this.runExport('docx') },
       { label: '导出 Markdown 副本…', run: () => void this.runExport('md') },
       { label: '导出纯文本…', hint: '去标记后写 txt', run: () => void this.runExport('txt') },
+      { label: '导出 OPML 大纲…', hint: '标题树，给大纲工具', run: () => void this.runExport('opml') },
       { divider: true, label: '' },
       { label: '导出文件夹为 HTML…', hint: '整个文件夹批量导出', run: () => void this.publishBatch(false) },
       { label: '导出静态站点…', hint: '含导航页与搜索索引', run: () => void this.publishBatch(true) },
@@ -1160,6 +1277,37 @@ export class Workspace {
           baseName,
           meta: tab.state.meta,
           extension: kind
+        })
+        if (result.ok) {
+          this.setMessage(`已导出：${result.value}`)
+          this.revealTarget = result.value
+        } else {
+          this.notify(result.error)
+        }
+      } else if (kind === 'docx') {
+        const built = buildDocx(tab.state.text, tab.state.path)
+        const result = await window.mdforge.exportDocx({
+          bodyXml: built.bodyXml,
+          title: deriveTitle(tab.state.text, baseName),
+          docPath: tab.state.path,
+          baseName,
+          options,
+          links: built.links,
+          images: built.images
+        })
+        if (result.ok) {
+          const imageNote = result.value.images > 0 ? `（嵌入 ${result.value.images} 张图片）` : ''
+          const missNote = result.value.missing.length > 0 ? `（${result.value.missing.length} 张图片读取失败，已留文字占位）` : ''
+          this.setMessage(`已导出：${result.value.path}${imageNote}${missNote}`)
+          this.revealTarget = result.value.path
+        } else {
+          this.notify(result.error)
+        }
+      } else if (kind === 'opml') {
+        const result = await window.mdforge.exportOpml({
+          opml: buildOpml(tab.state.text, deriveTitle(tab.state.text, baseName)),
+          docPath: tab.state.path,
+          baseName
         })
         if (result.ok) {
           this.setMessage(`已导出：${result.value}`)
@@ -1965,8 +2113,9 @@ export class Workspace {
     this.lastMessage = message ?? `已保存：${snapshot.path}`
     this.revealTarget = reveal ? snapshot.path : null
     void window.mdforge.draftClear([previousKey, tab.key])
-    // 盘上内容变了：链接索引要重扫，检查里的磁盘类问题也重新核对
+    // 盘上内容变了：链接与标签索引要重扫，检查里的磁盘类问题也重新核对
     this.linkIndex = null
+    this.tagsIndex = null
     if (tab.active) void this.runCheck(false)
     this.schedulePersist()
   }
@@ -2180,12 +2329,17 @@ export class Workspace {
       contentWidth: this.contentWidthMode,
       viewMode: this.viewMode,
       typewriter: this.typewriterOn,
-      focusMode: this.focusOn
+      focusMode: this.focusOn,
+      sidebarWidth: this.sidebarWidth,
+      splitRatio: this.splitRatio,
+      keybindings: keybindingsSnapshot()
     })
   }
 
   async init(): Promise<void> {
     const [startup, session] = await Promise.all([window.mdforge.startupPaths(), window.mdforge.sessionRead()])
+    // 键位要在任何编辑器建成之前装好：keymap 是创建时按绑定表组装的
+    loadKeybindings(session?.keybindings)
     this.recents = session?.recents ?? []
     this.favorites = session?.favorites ?? []
     this.autoSave = session?.autoSave ?? true
@@ -2199,6 +2353,10 @@ export class Workspace {
     this.viewMode = normalizeViewMode(session?.viewMode) ?? 'edit'
     this.typewriterOn = session?.typewriter === true
     this.focusOn = session?.focusMode === true
+    this.sidebarWidth = normalizeSidebarWidth(session?.sidebarWidth) ?? SIDEBAR_WIDTH_DEFAULT
+    this.splitRatio = normalizeSplitRatio(session?.splitRatio) ?? SPLIT_RATIO_DEFAULT
+    applySidebarWidth(this.sidebarWidth)
+    applySplitRatio(this.splitRatio)
     if (this.viewMode === 'split') this.sourceOn = true
     this.preview.setTheme(themeForApp(currentTheme()))
     this.applyViewPrefs()

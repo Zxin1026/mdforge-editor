@@ -1,4 +1,4 @@
-import { app, clipboard, ipcMain, type BrowserWindow } from 'electron'
+import { app, clipboard, ClipboardItem, ipcMain, type BrowserWindow } from 'electron'
 import { CHANNEL, normalizeZoom } from '../shared/ipc'
 
 /**
@@ -27,6 +27,31 @@ export function registerWindowHandlers(getWindow: () => BrowserWindow | null): v
     if (typeof text !== 'string' || text === '') return false
     clipboard.writeText(text)
     return true
+  })
+
+  // 富文本复制：HTML 与纯文本一次原子写入，粘到 Word / 微信里表格与强调都还在
+  ipcMain.handle(CHANNEL.clipboardWriteHtml, async (_event, html: unknown, text: unknown) => {
+    if (typeof html !== 'string' || html === '') return false
+    const plain = typeof text === 'string' ? text : ''
+    try {
+      const items: Record<string, string> = { 'text/html': html }
+      if (plain !== '') items['text/plain'] = plain
+      await clipboard.write([new ClipboardItem(items)])
+      return true
+    } catch {
+      return false
+    }
+  })
+
+  ipcMain.handle(CHANNEL.clipboardWriteImage, async (_event, raw: unknown) => {
+    if (!(raw instanceof Uint8Array) || raw.length === 0) return false
+    try {
+      const blob = new Blob([Buffer.from(raw)], { type: 'image/png' })
+      await clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      return true
+    } catch {
+      return false
+    }
   })
 
   ipcMain.handle(CHANNEL.toggleFullScreen, () => {

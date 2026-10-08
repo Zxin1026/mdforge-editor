@@ -1406,7 +1406,10 @@ win13.on('dialog', (d) => {
   nativeDialogs += 1
   d.accept().catch(() => {})
 })
-win13.on('pageerror', (e) => pageErrors.push(e.message))
+win13.on('pageerror', (e) => {
+  pageErrors.push(e.message)
+  console.log(`  渲染进程错误：${e.message}`)
+})
 await win13.waitForSelector('.cm-content')
 await win13.waitForTimeout(600)
 
@@ -1471,8 +1474,16 @@ async function openOptions() {
 }
 
 /* 导出选项随会话持久化：先把基线钉死，否则上一轮留下的内联/衬排会让这一节的断言指错方向 */
-await openOptions()
-await setOption('复制图片')
+try {
+  await openOptions()
+  await setOption('复制图片')
+} catch (error) {
+  // 断在菜单层级上时把当时可见的菜单项与截图留下来，方便定位
+  const openLabels = await win13.$$eval('.mdf-menu-item', (els) => els.map((el) => el.dataset.menuLabel))
+  console.log(`  诊断：菜单项 = ${JSON.stringify(openLabels)}`)
+  await win13.screenshot({ path: path.join(root, 'verify', 'diag-options.png') }).catch(() => {})
+  throw error
+}
 await setOption('默认')
 await ensureOptionOff('在开头插入目录')
 await ensureMenuClosed()
@@ -2699,6 +2710,472 @@ check(
 )
 
 await app15.close()
+
+/* ============ P1 第二批：布局拖拽 / 命令面板 / 快捷键 / 标签 / 过滤 / 模板 / DOCX / OPML / 剪贴板 / 语法转换 ============ */
+const p1bDoc = path.join(p1Dir, '排版样例.md')
+writeFileSync(
+  p1bDoc,
+  [
+    '---',
+    'title: 版面样例',
+    'tags: [样式]',
+    '---',
+    '',
+    '# 版面样例',
+    '',
+    '带格式的普通段落，含 **加粗** 与 `行内代码`。',
+    '',
+    '## 小节',
+    '',
+    '| 列 A | 列 B |',
+    '| --- | --- |',
+    '| 1 | 2 |',
+    '',
+    '- [ ] 待办',
+    '- 普通条目',
+    '',
+    '```js',
+    'const answer = 42',
+    '```',
+    '',
+    '[子页](notes/child.md)',
+    '',
+    '![图](assets/shot.webp)',
+    '',
+    'filtertoken 排版样例一行。',
+    ''
+  ].join('\n'),
+  'utf8'
+)
+mkdirSync(path.join(p1Dir, '草稿'), { recursive: true })
+writeFileSync(
+  path.join(p1Dir, '草稿', '临时.md'),
+  '---\ntags: [样式, 草稿]\n---\n\n# 临时\n\nfiltertoken 的草稿记录。\n',
+  'utf8'
+)
+writeFileSync(path.join(p1Dir, '过滤靶.md'), '# 过滤靶\n\nfiltertoken 只有这一行。\n', 'utf8')
+const p1bDocx = path.join(p1Dir, '样例.docx')
+const p1bOpml = path.join(p1Dir, '样例.opml')
+
+const app16 = await _electron.launch({ executablePath: require('electron'), args: [root, p1bDoc], cwd: root })
+const win16 = await app16.firstWindow()
+win16.on('dialog', (d) => {
+  nativeDialogs += 1
+  d.accept().catch(() => {})
+})
+win16.on('pageerror', (e) => pageErrors.push(e.message))
+win16.on('console', (m) => {
+  if (m.type() === 'error') consoleErrors.push(m.text())
+})
+await win16.waitForSelector('.cm-content')
+await win16.waitForTimeout(600)
+
+const activeText16 = () =>
+  win16.evaluate(() => {
+    const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+    return shown?.querySelector('.cm-content')?.innerText ?? ''
+  })
+const closeMenu16 = async () => {
+  for (let step = 0; step < 3; step += 1) {
+    if ((await win16.locator('.mdf-menu').count()) === 0) return
+    await win16.keyboard.press('Escape')
+    await win16.waitForTimeout(150)
+  }
+}
+const menuOpen16 = async (top) => {
+  await closeMenu16()
+  await win16.click(`.mdf-menubar-button[data-menu="${top}"]`)
+  await win16.waitForSelector('.mdf-menu--bar')
+}
+const menuPick16 = async (label) => {
+  await win16.locator(`.mdf-menu-item[data-menu-label="${label}"]`).last().click()
+  await win16.waitForTimeout(220)
+}
+const saveDialog16 = (target) =>
+  app16.evaluate(({ dialog }, file) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: file })
+  }, target)
+const clickLine16 = async (needle) => {
+  const index = await win16.evaluate((text) => {
+    const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+    if (!shown) return -1
+    return [...shown.querySelectorAll('.cm-line')].findIndex((el) => el.innerText.includes(text))
+  }, needle)
+  if (index < 0) {
+    console.log(`  警告：找不到包含「${needle}」的行`)
+    return false
+  }
+  await win16.locator('.cm-line:visible').nth(index).click()
+  return true
+}
+const session16 = () => {
+  try {
+    return JSON.parse(readSafe(path.join(userData, 'session.json')) ?? '{}')
+  } catch {
+    return {}
+  }
+}
+
+/* p1-0 布局：拖侧边栏分隔条与分屏分隔条 */
+const sidebarBefore16 = await win16.evaluate(() => document.querySelector('#outline').getBoundingClientRect().width)
+const resizerBox16 = await win16.locator('#sidebar-resizer').boundingBox()
+const paneLeft16 = await win16.evaluate(() => document.querySelector('.body').getBoundingClientRect().left)
+const chrome16 = await win16.evaluate(() => {
+  const el = document.querySelector('#outline')
+  return el.getBoundingClientRect().width - Number.parseFloat(getComputedStyle(el).width)
+})
+await win16.mouse.move(resizerBox16.x + 2, resizerBox16.y + 160)
+await win16.mouse.down()
+await win16.mouse.move(resizerBox16.x + 92, resizerBox16.y + 160, { steps: 6 })
+await win16.mouse.up()
+await win16.waitForTimeout(300)
+const sidebarAfter16 = await win16.evaluate(() => document.querySelector('#outline').getBoundingClientRect().width)
+// 分隔条跟着指针走：结束时宽度 = 指针位置 - 主区左缘（再加上内容盒与外框的差）
+const expectedSidebar16 = resizerBox16.x + 92 - paneLeft16 + chrome16
+check(
+  '拖动分隔条调宽侧边栏',
+  Math.abs(sidebarAfter16 - expectedSidebar16) < 5,
+  `${sidebarBefore16} → ${sidebarAfter16}（预期 ${expectedSidebar16}）`
+)
+await win16.waitForTimeout(800)
+check(
+  '侧边栏宽度写进会话',
+  Math.abs(Number(session16().sidebarWidth ?? 0) - (sidebarAfter16 - chrome16)) < 2,
+  JSON.stringify(session16().sidebarWidth)
+)
+
+await menuOpen16('view')
+await menuPick16('分屏预览')
+await closeMenu16()
+await win16.waitForTimeout(600)
+const paneBefore16 = await win16.evaluate(() => document.querySelector('.split-preview').getBoundingClientRect().width)
+const splitBox16 = await win16.locator('.split-resizer').boundingBox()
+await win16.mouse.move(splitBox16.x + 3, splitBox16.y + 120)
+await win16.mouse.down()
+await win16.mouse.move(splitBox16.x - 97, splitBox16.y + 120, { steps: 6 })
+await win16.mouse.up()
+await win16.waitForTimeout(300)
+const paneAfter16 = await win16.evaluate(() => document.querySelector('.split-preview').getBoundingClientRect().width)
+check('左拖分屏分隔条扩大预览栏', paneAfter16 > paneBefore16 + 60, `${paneBefore16} → ${paneAfter16}`)
+await win16.screenshot({ path: path.join(root, 'verify', 'p1b-layout.png') })
+await win16.locator('.split-resizer').dblclick()
+await win16.waitForTimeout(300)
+const paneReset16 = await win16.evaluate(() => document.querySelector('.split-preview').getBoundingClientRect().width)
+check('双击分隔条恢复到一半', Math.abs(paneReset16 - paneBefore16) < 6, `${paneReset16} vs ${paneBefore16}`)
+await menuOpen16('view')
+await menuPick16('分屏预览')
+await closeMenu16()
+await win16.waitForTimeout(400)
+
+/* P1-1 命令面板：呼出、模糊过滤、执行、再执行可关闭、Esc 关闭 */
+await win16.keyboard.press('Control+Shift+P')
+await win16.waitForSelector('.mdf-palette-backdrop')
+const paletteCount16 = await win16.$$eval('.mdf-palette-item', (els) => els.length)
+check('命令面板呼出并列出命令', paletteCount16 > 10, String(paletteCount16))
+await win16.fill('.mdf-palette-input', '打字机')
+await win16.waitForTimeout(250)
+const paletteFirst16 = await win16.textContent('.mdf-palette-item.is-active .mdf-palette-label')
+check('命令面板模糊过滤命中', paletteFirst16 === '打字机模式', paletteFirst16)
+await win16.screenshot({ path: path.join(root, 'verify', 'p1b-palette.png') })
+await win16.keyboard.press('Enter')
+await win16.waitForTimeout(600)
+const typePadOn16 = await win16.evaluate(() => {
+  const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+  const content = shown?.querySelector('.cm-content')
+  return content ? Number.parseFloat(getComputedStyle(content).paddingTop) : 0
+})
+check('命令面板里回车执行命令', typePadOn16 > 200, String(typePadOn16))
+await win16.keyboard.press('Control+Shift+P')
+await win16.waitForSelector('.mdf-palette-backdrop')
+await win16.fill('.mdf-palette-input', '打字机')
+await win16.waitForTimeout(250)
+await win16.keyboard.press('Enter')
+await win16.waitForTimeout(500)
+const typePadOff16 = await win16.evaluate(() => {
+  const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+  const content = shown?.querySelector('.cm-content')
+  return content ? Number.parseFloat(getComputedStyle(content).paddingTop) : 0
+})
+check('命令面板再次执行可关掉开关', typePadOff16 < 100, String(typePadOff16))
+await win16.keyboard.press('Control+Shift+P')
+await win16.waitForSelector('.mdf-palette-backdrop')
+await win16.keyboard.press('Escape')
+await win16.waitForTimeout(250)
+check('Esc 关闭命令面板', (await win16.locator('.mdf-palette-backdrop').count()) === 0)
+
+/* P1-2 快捷键：帮助弹窗跟随键位表；录制、冲突拦截、绑定生效与会话持久化 */
+await menuOpen16('help')
+await menuPick16('快捷键参考')
+await win16.waitForSelector('.mdf-dialog')
+const helpLines16 = await dialogText(win16)
+check(
+  '快捷键参考从键位表生成',
+  helpLines16.includes('命令面板') && helpLines16.includes('切换代码块') && helpLines16.includes('命令面板 Ctrl+Shift+P'),
+  helpLines16.slice(0, 90)
+)
+await answer(win16, '知道了')
+await menuOpen16('help')
+await menuPick16('快捷键设置…')
+await win16.waitForSelector('.mdf-keymap-dialog')
+await win16.locator('.keymap-row[data-command="italic"] .keymap-key').click()
+await win16.keyboard.press('Control+s')
+await win16.waitForTimeout(250)
+const conflict16 = await win16.textContent('.keymap-notice')
+check('快捷键冲突被拦下并指明目标', conflict16.includes('保存'), conflict16)
+await win16.keyboard.press('Escape')
+await win16.waitForTimeout(200)
+await win16.locator('.keymap-row[data-command="bold"] .keymap-key').click()
+await win16.keyboard.press('Control+Shift+B')
+await win16.waitForTimeout(300)
+const boldKey16 = await win16.textContent('.keymap-row[data-command="bold"] .keymap-key')
+check('录制新组合键即时生效', boldKey16 === 'Ctrl+Shift+B', boldKey16)
+await win16.screenshot({ path: path.join(root, 'verify', 'p1b-keymap.png') })
+await win16.locator('.mdf-dialog-button[data-action="keymap-close"]').click()
+await win16.waitForSelector('.mdf-keymap-dialog', { state: 'detached' })
+await win16.waitForTimeout(900)
+check(
+  '自定义绑定写进会话',
+  JSON.stringify(session16().keybindings ?? {}).includes('Ctrl+Shift+B'),
+  JSON.stringify(session16().keybindings)
+)
+await clickLine16('带格式的普通段落')
+await win16.keyboard.press('End')
+await win16.keyboard.press('Control+Shift+B')
+await win16.waitForTimeout(300)
+check('新组合键在编辑器里生效', (await activeText16()).includes('****'), '')
+await win16.keyboard.press('Control+z')
+await win16.waitForTimeout(250)
+await win16.keyboard.press('Control+b')
+await win16.waitForTimeout(250)
+check('旧组合键让位（不再触发加粗）', !(await activeText16()).includes('****'), '')
+await menuOpen16('help')
+await menuPick16('快捷键设置…')
+await win16.waitForSelector('.mdf-keymap-dialog')
+await win16.locator('.mdf-dialog-button[data-action="keymap-reset-all"]').click()
+await win16.waitForTimeout(250)
+await win16.locator('.mdf-dialog-button[data-action="keymap-close"]').click()
+await win16.waitForTimeout(900)
+check('全部恢复默认后会话不再有覆盖', !JSON.stringify(session16().keybindings ?? {}).includes('Ctrl+Shift+B'), '')
+
+/* P1-6 标签页：聚合计数、按标签筛文档、点开与标签名过滤 */
+await win16.click('.side-tab[data-side-tab="tags"]')
+await win16.waitForSelector('.tag-item', { timeout: 9000 })
+const styleChip16 = await win16.textContent('.tag-item[data-tag="样式"]')
+check('标签页聚合计数', styleChip16.includes('样式') && styleChip16.includes('2'), styleChip16)
+await win16.screenshot({ path: path.join(root, 'verify', 'p1b-tags.png') })
+await win16.locator('.tag-item[data-tag="样式"]').click()
+await win16.waitForTimeout(300)
+const tagDocs16 = await win16.$$eval('.link-item[data-tag-doc-path]', (els) => els.map((el) => el.dataset.tagDocPath))
+check('按标签筛出两篇文档', tagDocs16.length === 2, JSON.stringify(tagDocs16))
+await win16.locator('.link-item[data-tag-doc-path]', { hasText: '临时' }).click()
+await win16.waitForTimeout(600)
+check('点标签下的文档能打开', (await win16.textContent('#file-name')).includes('临时'), await win16.textContent('#file-name'))
+await win16.locator('.tab', { hasText: '排版样例' }).click()
+await win16.waitForTimeout(400)
+await win16.fill('[data-role="tags-filter"]', '草稿')
+await win16.waitForTimeout(300)
+const filteredChips16 = await win16.$$eval('.tag-item', (els) => els.map((el) => el.dataset.tag))
+check(
+  '标签名过滤只留匹配项',
+  filteredChips16.includes('草稿') && !filteredChips16.includes('小说'),
+  JSON.stringify(filteredChips16)
+)
+await win16.fill('[data-role="tags-filter"]', '')
+
+/* P1-4 工作区搜索过滤：include / exclude glob 收窄命中文件 */
+await win16.click('.side-tab[data-side-tab="search"]')
+await win16.waitForSelector('.search-panel')
+const searchInputs16 = win16.locator('.search-panel .search-input')
+await searchInputs16.nth(0).fill('filtertoken')
+await win16.locator('[data-action="search-run"]').click()
+await win16.waitForTimeout(900)
+const scanNote16 = await win16.textContent('[data-note="search"]')
+const scanFiles16 = await win16.$$eval('.search-file', (els) => els.map((el) => el.dataset.filePath))
+check('工作区搜索命中三篇文档', scanFiles16.length === 3, JSON.stringify(scanFiles16))
+await searchInputs16.nth(2).fill('!草稿/**')
+await win16.locator('[data-action="search-run"]').click()
+await win16.waitForTimeout(900)
+const exclFiles16 = await win16.$$eval('.search-file', (els) => els.map((el) => el.dataset.filePath))
+check(
+  '排除 glob 生效',
+  exclFiles16.length === 2 && !exclFiles16.some((file) => file.includes('草稿')),
+  JSON.stringify(exclFiles16)
+)
+await searchInputs16.nth(2).fill('临时.md')
+await win16.locator('[data-action="search-run"]').click()
+await win16.waitForTimeout(900)
+const onlyFiles16 = await win16.$$eval('.search-file', (els) => els.map((el) => el.dataset.filePath))
+check('文件名 glob 收窄到一篇', onlyFiles16.length === 1 && onlyFiles16[0].includes('临时'), JSON.stringify(onlyFiles16))
+check('摘要报告过滤后的扫描数', scanNote16.includes('扫描 5 个文件'), scanNote16)
+await searchInputs16.nth(2).fill('')
+
+/* P1-5 文档模板：弹窗列出预设、回车新建、日期占位符替换 */
+await menuOpen16('file')
+await menuPick16('从模板新建…')
+await win16.waitForSelector('.mdf-template-dialog')
+const tplNames16 = await win16.$$eval('.template-name', (els) => els.map((el) => el.textContent))
+check(
+  '模板弹窗列出内置预设',
+  tplNames16.includes('技术博客') && tplNames16.includes('会议记录') && tplNames16.length >= 4,
+  JSON.stringify(tplNames16)
+)
+await win16.screenshot({ path: path.join(root, 'verify', 'p1b-template.png') })
+await win16.keyboard.press('Enter')
+await win16.waitForTimeout(600)
+const tplText16 = await activeText16()
+const now16 = new Date()
+const stamp16 = `${now16.getFullYear()}-${String(now16.getMonth() + 1).padStart(2, '0')}-${String(now16.getDate()).padStart(2, '0')}`
+check(
+  '模板新建并替换日期占位符',
+  tplText16.includes('title:') && tplText16.includes('实现') && tplText16.includes(stamp16) && !tplText16.includes('{{date}}'),
+  tplText16.slice(0, 60)
+)
+await win16.locator('.tab.is-active .tab-close').click()
+await win16.waitForSelector('.mdf-dialog')
+await answer(win16, '不保存关闭')
+await win16.waitForTimeout(400)
+// 关掉模板标签后回到「排版样例」，后续导出都基于它
+await win16.locator('.tab', { hasText: '排版样例' }).click()
+await win16.waitForTimeout(400)
+await closeMenu16()
+
+/* P1-3 导出：DOCX（zip 结构 + 正文 XML + 图片）与 OPML（标题树） */
+await saveDialog16(p1bDocx)
+await menuOpen16('file')
+await menuPick16('导出')
+await win16.waitForSelector('.mdf-menu--sub')
+const exportLabels16 = await win16.$$eval('.mdf-menu--sub .mdf-menu-item', (els) => els.map((el) => el.dataset.menuLabel))
+check(
+  '导出菜单含 Word 与 OPML',
+  ['导出 Word (DOCX)…', '导出 OPML 大纲…'].every((label) => exportLabels16.includes(label)),
+  JSON.stringify(exportLabels16)
+)
+await win16.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 Word (DOCX)…"]').click()
+await waitForFile(() => existsSync(p1bDocx), 25000)
+const docxBytes16 = existsSync(p1bDocx) ? readFileSync(p1bDocx) : Buffer.alloc(0)
+check(
+  'DOCX 包结构完整（样式/编号/图片部件）',
+  docxBytes16.includes('word/styles.xml') &&
+    docxBytes16.includes('word/numbering.xml') &&
+    docxBytes16.includes('word/media/image1.webp'),
+  `size=${docxBytes16.length}`
+)
+const docxXml16 = inflateEntry(docxBytes16, 'word/document.xml')
+check(
+  'DOCX 正文含标题/编号/表格/图片关系',
+  docxXml16.includes('Heading1') &&
+    docxXml16.includes('w:numId') &&
+    docxXml16.includes('<w:tbl>') &&
+    docxXml16.includes('r:embed="I'),
+  docxXml16.slice(0, 80)
+)
+const docxRels16 = inflateEntry(docxBytes16, 'word/_rels/document.xml.rels')
+check('DOCX 关系表含超链接与图片', docxRels16.includes('TargetMode="External"') && docxRels16.includes('media/image1.webp'), '')
+
+await saveDialog16(p1bOpml)
+await menuOpen16('file')
+await menuPick16('导出')
+await win16.waitForSelector('.mdf-menu--sub')
+await win16.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 OPML 大纲…"]').click()
+await waitForFile(() => existsSync(p1bOpml), 15000)
+const opml16 = readSafe(p1bOpml) ?? ''
+check(
+  'OPML 大纲含标题层级、任务标记与备注',
+  opml16.includes('<opml version="2.0">') && opml16.includes('text="小节"') && opml16.includes('☐') && opml16.includes('_note='),
+  opml16.replace(/\n/g, ' ').slice(0, 90)
+)
+
+/* P1-7 剪贴板：菜单复制写 HTML 格式；图片管理器复制图片写位图 */
+await win16.locator('.cm-line:visible').first().click()
+await win16.keyboard.press('Control+a')
+await menuOpen16('edit')
+await menuPick16('复制')
+await win16.waitForTimeout(500)
+const clip16 = await app16.evaluate(async ({ clipboard }) => {
+  const items = await clipboard.read()
+  const types = items.flatMap((item) => item.types)
+  let html = ''
+  for (const item of items) {
+    const type = item.types.find((candidate) => candidate.toLowerCase() === 'text/html')
+    if (!type) continue
+    const value = await item.getType(type)
+    if (typeof value === 'string') html = value
+    else if (value instanceof Blob) html = await value.text()
+  }
+  return { types, html }
+})
+check(
+  '菜单复制写入 HTML 格式（表格保留）',
+  clip16.types.some((type) => type.toLowerCase() === 'text/html') && clip16.html.includes('<table'),
+  JSON.stringify(clip16.types)
+)
+await win16.click('.side-tab[data-side-tab="assets"]')
+await win16.waitForSelector('.asset-item', { timeout: 9000 })
+// 导出产物里也有同名图片，取列表里的第一张即可（都指向有效的 webp 文件）
+await win16
+  .locator('.asset-item[data-asset-name="shot.webp"] [data-action="assets-copy"]')
+  .first()
+  .click()
+// webp 要经画布转 PNG 再写剪贴板：轮询状态栏与剪贴板内容
+const copyNote16 = await until(
+  () => win16.textContent('#status'),
+  (text) => text.includes('已复制图片'),
+  10000
+)
+check('图片复制按钮回执', copyNote16.includes('已复制图片'), copyNote16)
+const clipTypes16 = await until(
+  () => app16.evaluate(async ({ clipboard }) => (await clipboard.read()).flatMap((item) => item.types)),
+  (types) => types.some((type) => type.toLowerCase().startsWith('image/')),
+  6000
+)
+check(
+  '剪贴板里出现图片数据',
+  clipTypes16.some((type) => type.toLowerCase().startsWith('image/')),
+  JSON.stringify(clipTypes16)
+)
+
+/* P1-8 语法转换：以磁盘上的正文为准断言（编辑器会隐藏 # 与任务标记） */
+const convFile16 = () => readSafe(p1bDoc) ?? ''
+const fenceCount16 = (text) => (text.match(/```/g) ?? []).length
+await clickLine16('带格式的普通段落')
+await win16.keyboard.press('End')
+await win16.keyboard.press('Control+Shift+K')
+await win16.waitForTimeout(250)
+await saveDoc(win16)
+await win16.waitForTimeout(700)
+check('切换代码块包裹段落', fenceCount16(convFile16()) === 4, `fences=${fenceCount16(convFile16())}`)
+await win16.keyboard.press('Control+Shift+K')
+await win16.waitForTimeout(250)
+await saveDoc(win16)
+await win16.waitForTimeout(700)
+check('再按一次拆掉围栏', fenceCount16(convFile16()) === 2, `fences=${fenceCount16(convFile16())}`)
+await clickLine16('待办')
+await win16.keyboard.press('Control+Shift+C')
+await win16.waitForTimeout(250)
+await saveDoc(win16)
+await win16.waitForTimeout(700)
+check('切换任务勾选', convFile16().includes('- [x] 待办'), '')
+await clickLine16('小节')
+await win16.keyboard.press('Control+Alt+=')
+await win16.waitForTimeout(250)
+await saveDoc(win16)
+await win16.waitForTimeout(700)
+check('提升标题级别', convFile16().includes('\n# 小节'), convFile16().split('\n').filter((line) => line.includes('小节')).join('|'))
+await win16.keyboard.press('Control+Alt+-')
+await win16.waitForTimeout(250)
+await saveDoc(win16)
+await win16.waitForTimeout(700)
+check('降低标题级别', convFile16().includes('\n## 小节'), '')
+await clickLine16('filtertoken 排版样例一行')
+await win16.keyboard.press('End')
+await win16.keyboard.press('Enter')
+await win16.keyboard.type('[] 收集')
+await win16.waitForTimeout(400)
+await saveDoc(win16)
+await win16.waitForTimeout(700)
+check('行首 [] + 空格转任务列表', convFile16().includes('- [ ] 收集'), '')
+
+await app16.close()
 
 const windowStateFile = path.join(process.env.APPDATA ?? homedir(), 'mdforge-editor', 'window-state.json')
 check('关闭时记住窗口尺寸位置', existsSync(windowStateFile), windowStateFile)

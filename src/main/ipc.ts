@@ -11,6 +11,9 @@ import {
   type BatchFileInput,
   type CustomStyleInput,
   type DocDraft,
+  type DocxExportInput,
+  type DocxImageRef,
+  type DocxLinkRef,
   type EpubChapterInput,
   type EpubExportInput,
   type ExportInput,
@@ -18,6 +21,7 @@ import {
   type FileMeta,
   type FileResult,
   type FileSnapshot,
+  type OpmlExportInput,
   type ResourceProbeInput,
   type SessionData,
   type TextExportInput,
@@ -25,13 +29,14 @@ import {
   type WorkspaceSearchInput,
   type WriteRequest
 } from '../shared/ipc'
-import { exportHtml, exportPdf, exportText } from './export'
+import { exportHtml, exportOpml, exportPdf, exportText } from './export'
 import { answerWindowClose } from './close-guard'
 import { FileOpError } from './fs/error'
 import { startupPaths } from './fs/startup'
 import { saveAsset } from './fs/asset-store'
 import { listAssets, readAssetBytes, renameAssets, replaceAsset } from './fs/asset-manager'
 import { chooseExportFolder, exportBatch } from './fs/batch-export'
+import { exportDocx } from './fs/docx'
 import { exportEpub } from './fs/epub'
 import { deleteStyle, listStyles, saveStyle } from './fs/style-store'
 import { exportStyle, importStyle } from './fs/style-transfer'
@@ -43,6 +48,7 @@ import { createFile, createFolder, listFolder, movePath, renamePath } from './fs
 import { trashPath } from './fs/trash'
 import { replaceWorkspace, searchWorkspace } from './fs/search'
 import { scanLinks } from './fs/link-index'
+import { scanTags } from './fs/tags-index'
 import {
   grantFolder,
   grantPath,
@@ -164,8 +170,7 @@ function parseProbeInput(raw: unknown): ResourceProbeInput {
 }
 
 /** 搜索参数：路径、内容与两个开关逐项校验 */
-function parseSearchInput(raw: unknown): WorkspaceSearchInput {
-  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '搜索参数不合法')
+function parseSearchInput(raw: unknown): WorkspaceSearchInput {  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '搜索参数不合法')
   const input = raw as Partial<WorkspaceSearchInput>
   if (typeof input.dir !== 'string' || typeof input.query !== 'string') {
     throw new FileOpError('invalid-path', '搜索参数不完整')
@@ -174,7 +179,8 @@ function parseSearchInput(raw: unknown): WorkspaceSearchInput {
     dir: input.dir,
     query: input.query,
     caseSensitive: input.caseSensitive === true,
-    regex: input.regex === true
+    regex: input.regex === true,
+    filter: typeof input.filter === 'string' ? input.filter.slice(0, 400) : ''
   }
 }
 
@@ -326,6 +332,60 @@ function parseEpubExport(raw: unknown): EpubExportInput {
   }
 }
 
+/** DOCX 参数：正文 XML 与关系清单逐个过形状检查，数量设上限 */
+const MAX_DOCX_IMAGES = 300
+const MAX_DOCX_LINKS = 500
+
+function parseDocxExport(raw: unknown): DocxExportInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '导出参数不合法')
+  const input = raw as Partial<DocxExportInput>
+  if (typeof input.bodyXml !== 'string' || typeof input.title !== 'string' || typeof input.baseName !== 'string') {
+    throw new FileOpError('invalid-path', '导出参数不完整')
+  }
+  const links = Array.isArray(input.links)
+    ? input.links
+        .filter(
+          (item): item is DocxLinkRef =>
+            item !== null && typeof item === 'object' && typeof item.id === 'string' && typeof item.target === 'string'
+        )
+        .slice(0, MAX_DOCX_LINKS)
+    : []
+  const images = Array.isArray(input.images)
+    ? input.images
+        .filter(
+          (item): item is DocxImageRef =>
+            item !== null &&
+            typeof item === 'object' &&
+            typeof item.id === 'string' &&
+            typeof item.path === 'string' &&
+            (typeof item.widthPx === 'number' || item.widthPx === null)
+        )
+        .slice(0, MAX_DOCX_IMAGES)
+    : []
+  return {
+    bodyXml: input.bodyXml,
+    title: input.title,
+    docPath: typeof input.docPath === 'string' ? input.docPath : null,
+    baseName: input.baseName,
+    options: normalizeExportOptions(input.options),
+    links,
+    images
+  }
+}
+
+function parseOpmlExport(raw: unknown): OpmlExportInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '导出参数不合法')
+  const input = raw as Partial<OpmlExportInput>
+  if (typeof input.opml !== 'string' || typeof input.baseName !== 'string') {
+    throw new FileOpError('invalid-path', '导出参数不完整')
+  }
+  return {
+    opml: input.opml,
+    docPath: typeof input.docPath === 'string' ? input.docPath : null,
+    baseName: input.baseName
+  }
+}
+
 export function registerFileHandlers(getWindow: () => BrowserWindow | null): void {
   onExternalChange((change) => getWindow()?.webContents.send(CHANNEL.externalChange, change))
 
@@ -433,6 +493,13 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
     guarded(() => {
       if (typeof target !== 'string' || !target) throw new FileOpError('invalid-path', '文件夹路径不合法')
       return scanLinks(target)
+    })
+  )
+
+  ipcMain.handle(CHANNEL.scanTags, (_event, target: unknown) =>
+    guarded(() => {
+      if (typeof target !== 'string' || !target) throw new FileOpError('invalid-path', '文件夹路径不合法')
+      return scanTags(target)
     })
   )
 
@@ -569,6 +636,14 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
 
   ipcMain.handle(CHANNEL.exportEpub, (_event, raw: unknown) =>
     guarded(() => exportEpub(parseEpubExport(raw), getWindow()))
+  )
+
+  ipcMain.handle(CHANNEL.exportDocx, (_event, raw: unknown) =>
+    guarded(() => exportDocx(parseDocxExport(raw), getWindow()))
+  )
+
+  ipcMain.handle(CHANNEL.exportOpml, (_event, raw: unknown) =>
+    guarded(() => exportOpml(parseOpmlExport(raw), getWindow()))
   )
 
   ipcMain.handle(CHANNEL.styleList, async () => {

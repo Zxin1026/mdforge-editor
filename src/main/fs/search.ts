@@ -103,14 +103,78 @@ function testName(name: string, source: string, caseSensitive: boolean): boolean
   return new RegExp(source, caseSensitive ? '' : 'i').test(name)
 }
 
+/** glob → 正则源：`**` 跨目录、`*` 单层、`?` 单字符；其余字面量转义 */
+function globSource(pattern: string): string {
+  let out = ''
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index]
+    if (char === '*') {
+      if (pattern[index + 1] === '*') {
+        // `**/` 允许零层目录：`a/**/b` 也要匹配 `a/b`
+        if (pattern[index + 2] === '/') {
+          out += '(?:.*/)?'
+          index += 2
+        } else {
+          out += '.*'
+          index += 1
+        }
+      } else {
+        out += '[^/]*'
+      }
+    } else if (char === '?') {
+      out += '[^/]'
+    } else {
+      out += char.replace(/[.*+^${}()|[\]\\]/, '\\$&')
+    }
+  }
+  return out
+}
+
+/**
+ * 路径过滤串：逗号或空白分隔的 glob，前缀 ! 为排除。
+ * 带 / 的模式匹配相对根的 posix 路径，否则匹配文件名。
+ */
+export function buildPathFilter(raw: unknown): ((relative: string, name: string) => boolean) | null {
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  const include: RegExp[] = []
+  const exclude: RegExp[] = []
+  for (const token of raw.split(/[,\s，;；]+/)) {
+    if (token === '') continue
+    const negated = token.startsWith('!')
+    const pattern = negated ? token.slice(1) : token
+    if (pattern === '') continue
+    let source: string
+    try {
+      source = globSource(pattern)
+    } catch {
+      continue
+    }
+    const regex = new RegExp(`^${source}$`, 'i')
+    ;(negated ? exclude : include).push(regex)
+  }
+  if (include.length === 0 && exclude.length === 0) return null
+  return (relative, name) => {
+    const matches = (regexes: RegExp[]): boolean =>
+      regexes.some((regex) => regex.test(relative) || regex.test(name))
+    if (matches(exclude)) return false
+    if (include.length > 0 && !matches(include)) return false
+    return true
+  }
+}
+
 export async function searchWorkspace(input: WorkspaceSearchInput): Promise<WorkspaceSearchResult> {
   const root = requireUnderRoot(input?.dir, '文件夹路径')
   const matcher = buildMatcher(input?.query, input?.caseSensitive === true, input?.regex === true)
+  const keep = buildPathFilter(input?.filter)
 
-  const { files, truncated: walkTruncated } = await walkMarkdownFiles(root)
+  const walked = await walkMarkdownFiles(root)
+  const files =
+    keep === null
+      ? walked.files
+      : walked.files.filter((file) => keep(path.relative(root, file.path).split(path.sep).join('/'), file.name))
   const hits: WorkspaceFileHit[] = []
   let total = 0
-  let truncated = walkTruncated
+  let truncated = walked.truncated
 
   for (const file of files) {
     if (total >= MAX_TOTAL_MATCHES) {

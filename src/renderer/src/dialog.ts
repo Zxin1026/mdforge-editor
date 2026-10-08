@@ -137,7 +137,7 @@ export function askDialog<T>(spec: DialogSpec<T>): Promise<T> {
   })
 }
 
-/** 是否有确认框打开：全局快捷键要给它让路，别让 Ctrl+S 在框后面继续写盘 */
+/** 是否有确认框/命令面板打开：全局快捷键要给它让路，别让 Ctrl+S 在框后面继续写盘 */
 export function dialogOpen(): boolean {
-  return document.querySelector('.mdf-dialog-backdrop') !== null
+  return document.querySelector('.mdf-dialog-backdrop, .mdf-palette-backdrop') !== null
 }

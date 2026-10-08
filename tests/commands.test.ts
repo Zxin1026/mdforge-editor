@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { EditorState, type TransactionSpec } from '@codemirror/state'
 import {
+  codeBlockPlan,
   enterPlan,
+  headingLevelPlan,
   headingPlan,
   listPlan,
   parseMarkers,
   quotePlan,
   tablePlan,
+  taskTogglePlan,
   toggleWrapPlan
 } from '../src/renderer/src/editor/commands'
 import { markdownLanguageExtension } from '../src/renderer/src/editor/markdown'
@@ -173,5 +176,76 @@ describe('回车续写列表', () => {
     const head = idx(doc, '乙')
     const r = apply(stateWith(doc, [head]), enterPlan(stateWith(doc, [head])))
     expect(r?.text).toBe('- 甲\n- 乙丙')
+  })
+})
+
+describe('语法转换：代码块', () => {
+  it('把当前段落包进围栏，再按一次拆掉', () => {
+    const doc = '第一段\n\n要代码\n第二行'
+    const st = stateWith(doc, [idx(doc, '要代码')])
+    const wrapped = apply(st, codeBlockPlan(st))
+    expect(wrapped?.text).toBe('第一段\n\n```\n要代码\n第二行\n```')
+    const inner = wrapped!.text.indexOf('要代码')
+    const st2 = stateWith(wrapped!.text, [inner])
+    const unwrapped = apply(st2, codeBlockPlan(st2))
+    expect(unwrapped?.text).toBe(doc)
+  })
+
+  it('有选区时包裹整个选区', () => {
+    const doc = '甲\n乙\n丙'
+    const st = stateWith(doc, [0, doc.length])
+    const r = apply(st, codeBlockPlan(st))
+    expect(r?.text).toBe('```\n甲\n乙\n丙\n```')
+  })
+})
+
+describe('语法转换：任务勾选', () => {
+  it('任务行翻转勾选状态', () => {
+    const doc = '- [ ] 待办\n- [x] 完成'
+    const st = stateWith(doc, [0, doc.length])
+    const r = apply(st, taskTogglePlan(st))
+    expect(r?.text).toBe('- [x] 待办\n- [ ] 完成')
+  })
+
+  it('普通列表行升级为任务', () => {
+    const doc = '- 项目'
+    const st = stateWith(doc, [2])
+    const r = apply(st, taskTogglePlan(st))
+    expect(r?.text).toBe('- [ ] 项目')
+  })
+
+  it('行首裸写 [] / [x] 规范成任务项', () => {
+    const plain = stateWith('[] 收集素材', [3])
+    expect(apply(plain, taskTogglePlan(plain))?.text).toBe('- [ ] 收集素材')
+    const checked = stateWith('[x] 归档', [3])
+    expect(apply(checked, taskTogglePlan(checked))?.text).toBe('- [x] 归档')
+  })
+
+  it('代码块里的行不动', () => {
+    const doc = '```\n- [ ] 示例\n```'
+    const st = stateWith(doc, [doc.indexOf('示例')])
+    expect(taskTogglePlan(st)).toBeNull()
+  })
+})
+
+describe('语法转换：标题级别', () => {
+  it('降低级别加一级井号，到六级不再降', () => {
+    const st = stateWith('## 标题', [3])
+    expect(apply(st, headingLevelPlan(st, 1))?.text).toBe('### 标题')
+    const six = stateWith('###### 底', [3])
+    expect(headingLevelPlan(six, 1)).toBeNull()
+  })
+
+  it('提升级别减一级井号，到一级不再升', () => {
+    const st = stateWith('## 标题', [3])
+    expect(apply(st, headingLevelPlan(st, -1))?.text).toBe('# 标题')
+    const one = stateWith('# 顶', [3])
+    expect(headingLevelPlan(one, -1)).toBeNull()
+  })
+
+  it('非标题行不动', () => {
+    const st = stateWith('普通段落', [1])
+    expect(headingLevelPlan(st, 1)).toBeNull()
+    expect(headingLevelPlan(st, -1)).toBeNull()
   })
 })

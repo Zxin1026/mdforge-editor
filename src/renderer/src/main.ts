@@ -5,8 +5,11 @@ import type { AppTheme } from '../../shared/ipc'
 import { appMenus, contextMenuEntries, handleUpdateEvent, type AppMenuContext } from './app-menu'
 import { openContextMenu } from './context-menu'
 import { dialogOpen } from './dialog'
+import { appKeyMap, effectiveKey, keyFromEvent } from './keybindings'
+import { openKeybindingDialog } from './keybinding-dialog'
 import type { MenuHandle } from './menu'
 import { createMenuBar } from './menubar'
+import { toggleCommandPalette } from './palette'
 import { createTheme } from './theme'
 import { Workspace } from './workspace'
 
@@ -18,6 +21,12 @@ root!.innerHTML = `
     <div id="tabbar" class="tabbar"></div>
     <div class="body">
       <aside id="outline" class="outline"></aside>
+      <div
+        id="sidebar-resizer"
+        class="pane-resizer"
+        data-resizer="sidebar"
+        title="拖动调整侧边栏宽度（双击恢复默认）"
+      ></div>
       <div id="editor-host" class="editor-host"></div>
     </div>
     <div class="status-bar">
@@ -39,6 +48,8 @@ async function boot(): Promise<void> {
     editorHost: document.querySelector<HTMLDivElement>('#editor-host')!,
     tabbar: document.querySelector<HTMLDivElement>('#tabbar')!,
     outline: document.querySelector<HTMLElement>('#outline')!,
+    sidebarResizer: document.querySelector<HTMLElement>('#sidebar-resizer')!,
+    paneBody: document.querySelector<HTMLElement>('.body')!,
     nameEl: document.querySelector<HTMLSpanElement>('#file-name')!,
     metaEl: document.querySelector<HTMLButtonElement>('#file-meta')!,
     autoSaveEl: document.querySelector<HTMLButtonElement>('#btn-autosave')!,
@@ -68,6 +79,7 @@ async function boot(): Promise<void> {
 
   const menuCtx: AppMenuContext = {
     newDoc: () => workspace.openNew(),
+    newFromTemplate: () => void workspace.openNewFromTemplate(),
     openDoc: () => void workspace.openViaDialog(),
     openFolder: () => void workspace.openFolderViaDialog(),
     save: () => void workspace.save(),
@@ -122,7 +134,9 @@ async function boot(): Promise<void> {
     checkUpdates: () => window.mdforge.checkUpdates(),
     downloadUpdate: () => window.mdforge.downloadUpdate(),
     installUpdate: () => window.mdforge.installUpdate(),
-    settleForRestart: () => workspace.settleForRestart()
+    settleForRestart: () => workspace.settleForRestart(),
+    commandPalette: () => toggleCommandPalette(menuCtx),
+    editKeybindings: () => openKeybindingDialog()
   }
 
   const menus = createMenuBar(document.querySelector<HTMLDivElement>('#menubar')!, appMenus(menuCtx), {
@@ -146,72 +160,61 @@ async function boot(): Promise<void> {
 
   document.querySelector('#btn-autosave')!.addEventListener('click', () => workspace.toggleAutoSave())
 
+  // ---- 窗口级快捷键：统一从键位表读（帮助 → 快捷键设置里可改）----
+  const appCommands: Record<string, () => void> = {
+    new: () => workspace.openNew(),
+    open: () => void workspace.openViaDialog(),
+    save: () => void workspace.save(),
+    saveAs: () => void workspace.saveAs(),
+    closeTab: () => void workspace.closeActive(),
+    workspaceSearch: () => workspace.openWorkspaceSearch(),
+    replace: () => workspace.runActive('replace'),
+    sourceMode: () => workspace.toggleSourceMode(),
+    palette: () => toggleCommandPalette(menuCtx),
+    zoomIn: () => workspace.zoomIn(),
+    zoomOut: () => workspace.zoomOut(),
+    zoomReset: () => workspace.zoomReset(),
+    fullScreen: () => toggleFullScreen(),
+    navBack: () => workspace.navBack(),
+    navForward: () => workspace.navForward()
+  }
+
+  /** 事件 → 命令：先精确匹配；Shift 常是敲 = / + 这类符号的副产品，没中就去掉 Shift 再试 */
+  function appCommandFor(event: KeyboardEvent): string | null {
+    const map = appKeyMap()
+    const key = keyFromEvent(event)
+    if (key !== null) {
+      const direct = map.get(key)
+      if (direct !== undefined) return direct
+    }
+    if (event.shiftKey) {
+      const relaxed = keyFromEvent({ ...event, shiftKey: false })
+      if (relaxed !== null) return map.get(relaxed) ?? null
+    }
+    return null
+  }
+
   window.addEventListener('keydown', (event) => {
-    const ctrl = event.ctrlKey || event.metaKey
-    if (!ctrl) return
-    // 确认框打开时把按键留给框本身
     if (dialogOpen()) return
-    const key = event.key.toLowerCase()
-    if (key === 's' && event.shiftKey) {
-      event.preventDefault()
-      void workspace.saveAs()
-    } else if (key === 's') {
-      event.preventDefault()
-      void workspace.save()
-    } else if (key === 'o') {
-      event.preventDefault()
-      void workspace.openViaDialog()
-    } else if (key === 'n') {
-      event.preventDefault()
-      workspace.openNew()
-    } else if (key === 'w') {
-      event.preventDefault()
-      void workspace.closeActive()
-    } else if (key === 'f' && event.shiftKey) {
-      // Ctrl+Shift+F：在工作区里搜索（Ctrl+F 留给当前文档的查找面板）
-      event.preventDefault()
-      workspace.openWorkspaceSearch()
-    } else if (key === 'h' && !event.shiftKey) {
-      event.preventDefault()
-      workspace.runActive('replace')
-    }
+    // CodeMirror 已经处理过的键不再重复触发（默认行为被拦过）
+    if (event.defaultPrevented) return
+    const id = appCommandFor(event)
+    if (id === null) return
+    const run = appCommands[id]
+    if (!run) return
+    event.preventDefault()
+    event.stopPropagation()
+    run()
   })
 
-  // 导航历史：Alt+← / Alt+→，与浏览器的习惯一致
-  window.addEventListener('keydown', (event) => {
-    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
-    if (dialogOpen()) return
-    if (event.key === 'ArrowLeft') {
-      event.preventDefault()
-      workspace.navBack()
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault()
-      workspace.navForward()
-    }
-  })
-
-  // 缩放：用 code 而不是 key，Ctrl+Shift+= 这类带 Shift 的写法在任何键盘布局下都指同一个物理键
-  window.addEventListener('keydown', (event) => {
-    if (!(event.ctrlKey || event.metaKey) || dialogOpen()) return
-    if (event.code === 'Equal' || event.code === 'NumpadAdd') {
-      event.preventDefault()
-      workspace.zoomIn()
-    } else if (event.code === 'Minus' || event.code === 'NumpadSubtract') {
-      event.preventDefault()
-      workspace.zoomOut()
-    } else if ((event.code === 'Digit0' && event.shiftKey) || event.code === 'Numpad0') {
-      event.preventDefault()
-      workspace.zoomReset()
-    }
-  })
-
-  // 源代码模式抢在 CodeMirror 之前处理，否则 Ctrl+/ 会被它的注释命令吃掉
+  // 源代码模式抢在 CodeMirror 之前处理，否则 Ctrl+/ 会被它的注释命令吃掉；
+  // 绑定仍从键位表读，改绑立即生效
   window.addEventListener(
     'keydown',
     (event) => {
-      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return
-      if (event.code !== 'Slash' && event.code !== 'NumpadDivide') return
       if (dialogOpen()) return
+      const bound = effectiveKey('sourceMode')
+      if (bound === null || keyFromEvent(event) !== bound) return
       event.preventDefault()
       event.stopPropagation()
       workspace.toggleSourceMode()
@@ -220,10 +223,7 @@ async function boot(): Promise<void> {
   )
 
   window.addEventListener('keydown', (event) => {
-    if (event.key === 'F11') {
-      event.preventDefault()
-      toggleFullScreen()
-    } else if (event.key === 'F12') {
+    if (event.key === 'F12') {
       event.preventDefault()
       void window.mdforge.openDevTools()
     }

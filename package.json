@@ -1,6 +1,6 @@
 {
   "name": "mdforge-editor",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "MDForge - a Windows Markdown editor with decoration-based live rendering",
   "main": "out/main/index.js",

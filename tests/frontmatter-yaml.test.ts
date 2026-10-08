@@ -6,7 +6,7 @@ import {
   parseFrontMatter,
   readFields,
   splitList
-} from '../src/renderer/src/editor/frontmatter-yaml'
+} from '../src/shared/frontmatter-yaml'
 
 const SAMPLE = [
   '# 这是注释',

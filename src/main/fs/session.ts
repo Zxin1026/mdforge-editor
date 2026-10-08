@@ -5,6 +5,8 @@ import {
   normalizeContentWidth,
   normalizeExportOptions,
   normalizeFontSize,
+  normalizeSidebarWidth,
+  normalizeSplitRatio,
   normalizeTheme,
   normalizeViewMode,
   normalizeZoom,
@@ -12,6 +14,8 @@ import {
 } from '../../shared/ipc'
 
 const MAX_LIST = 24
+/** 会话里最多记这么多条键位覆盖 */
+const MAX_KEYBINDINGS = 200
 
 function sessionFile(): string {
   return path.join(app.getPath('userData'), 'session.json')
@@ -24,6 +28,19 @@ function dedupe(list: unknown): string[] {
     if (typeof item === 'string' && item && !out.includes(item)) out.push(item)
   }
   return out.slice(0, MAX_LIST)
+}
+
+/** 键位覆盖的形状检查：渲染进程还会再按命令表逐条校验 */
+function sanitizeKeybindings(raw: unknown): Record<string, string | null> | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const out: Record<string, string | null> = {}
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof id !== 'string' || id === '') continue
+    if (value === null) out[id] = null
+    else if (typeof value === 'string' && value !== '' && value.length <= 40) out[id] = value
+    if (Object.keys(out).length >= MAX_KEYBINDINGS) break
+  }
+  return out
 }
 
 export async function readSession(): Promise<SessionData | null> {
@@ -45,7 +62,10 @@ export async function readSession(): Promise<SessionData | null> {
       contentWidth: normalizeContentWidth(data.contentWidth),
       viewMode: normalizeViewMode(data.viewMode),
       typewriter: typeof data.typewriter === 'boolean' ? data.typewriter : undefined,
-      focusMode: typeof data.focusMode === 'boolean' ? data.focusMode : undefined
+      focusMode: typeof data.focusMode === 'boolean' ? data.focusMode : undefined,
+      sidebarWidth: normalizeSidebarWidth(data.sidebarWidth),
+      splitRatio: normalizeSplitRatio(data.splitRatio),
+      keybindings: sanitizeKeybindings(data.keybindings)
     }
   } catch {
     return null
@@ -68,7 +88,10 @@ export async function writeSession(session: SessionData): Promise<void> {
     contentWidth: normalizeContentWidth(session.contentWidth),
     viewMode: normalizeViewMode(session.viewMode),
     typewriter: typeof session.typewriter === 'boolean' ? session.typewriter : undefined,
-    focusMode: typeof session.focusMode === 'boolean' ? session.focusMode : undefined
+    focusMode: typeof session.focusMode === 'boolean' ? session.focusMode : undefined,
+    sidebarWidth: normalizeSidebarWidth(session.sidebarWidth),
+    splitRatio: normalizeSplitRatio(session.splitRatio),
+    keybindings: sanitizeKeybindings(session.keybindings)
   }
   const file = sessionFile()
   await fs.mkdir(path.dirname(file), { recursive: true })

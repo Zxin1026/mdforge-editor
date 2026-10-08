@@ -55,6 +55,27 @@ export function normalizeContentWidth(raw: unknown): ContentWidth | undefined {
   return CONTENT_WIDTHS.includes(raw as ContentWidth) ? (raw as ContentWidth) : undefined
 }
 
+/** 侧边栏宽度（px）：拖动分隔条可调，超界取边界 */
+export const SIDEBAR_WIDTH_MIN = 150
+export const SIDEBAR_WIDTH_MAX = 480
+export const SIDEBAR_WIDTH_DEFAULT = 230
+
+export function normalizeSidebarWidth(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined
+  return Math.round(Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, raw)))
+}
+
+/** 分屏预览右栏占比：0.2–0.8，缺省一半 */
+export const SPLIT_RATIO_MIN = 0.2
+export const SPLIT_RATIO_MAX = 0.8
+export const SPLIT_RATIO_DEFAULT = 0.5
+
+export function normalizeSplitRatio(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined
+  const clamped = Math.min(SPLIT_RATIO_MAX, Math.max(SPLIT_RATIO_MIN, raw))
+  return Math.round(clamped * 100) / 100
+}
+
 /** 视图模式：编辑 / 左源码右渲染分屏 / 纯阅读（只读） */
 export type ViewMode = 'edit' | 'split' | 'read'
 
@@ -369,6 +390,52 @@ export interface EpubExportResult {
   images: number
 }
 
+/** DOCX 的编号表 id：渲染进程写进 numPr，主进程的 numbering.xml 按同一约定生成 */
+export const DOCX_NUM_BULLET = 1
+export const DOCX_NUM_ORDERED = 2
+
+/** DOCX 导出：渲染进程产出 <w:body> 与关系清单，主进程读图、拼包、写文件 */
+export interface DocxLinkRef {
+  /** 渲染进程分配的关系 id（rIdL 前缀） */
+  id: string
+  target: string
+}
+
+export interface DocxImageRef {
+  /** 占位注释里的图片 id（rIdI 前缀） */
+  id: string
+  /** 渲染进程解析好的绝对路径 */
+  path: string
+  /** 正文 w= 指定的显示宽度（px）；null 用原尺寸（超宽会收窄） */
+  widthPx: number | null
+}
+
+export interface DocxExportInput {
+  /** document.xml 的 <w:body> 内容（含 <!--mdfimg:ID--> 占位注释） */
+  bodyXml: string
+  title: string
+  docPath: string | null
+  baseName: string
+  options: ExportOptions
+  links: DocxLinkRef[]
+  images: DocxImageRef[]
+}
+
+export interface DocxExportResult {
+  path: string
+  /** 嵌入的图片张数 */
+  images: number
+  /** 读不到、被替换成文字占位的图片 */
+  missing: string[]
+}
+
+/** OPML 导出：XML 由渲染进程生成，主进程只负责落盘 */
+export interface OpmlExportInput {
+  opml: string
+  docPath: string | null
+  baseName: string
+}
+
 /** 文档检查：渲染进程不碰磁盘，引用是否存在由主进程按授权模型判定 */
 export type ResourceState = 'ok' | 'missing' | 'directory' | 'outside' | 'unknown'
 
@@ -518,6 +585,8 @@ export interface WorkspaceSearchInput {
   query: string
   caseSensitive: boolean
   regex: boolean
+  /** 路径过滤：逗号/空白分隔的 glob，前缀 ! 表示排除（如 `*.md, !draft/**`），缺省不过滤 */
+  filter?: string
 }
 
 export interface WorkspaceSearchResult {
@@ -573,6 +642,20 @@ export interface LinkIndexResult {
   links: DocLink[]
 }
 
+/** 标签索引：文件夹里带 front matter 标签的文档（tags / keywords 都认） */
+export interface DocTags {
+  path: string
+  name: string
+  tags: string[]
+}
+
+export interface TagIndexResult {
+  /** 全部可打开文档（与链接索引同一份口径） */
+  files: DocRef[]
+  /** 有标签的文档 */
+  docs: DocTags[]
+}
+
 /** 重启后恢复的会话：打开的标签顺序、当前标签、最近打开列表 */
 export interface SessionData {
   openDocs: string[]
@@ -602,6 +685,12 @@ export interface SessionData {
   typewriter?: boolean
   /** 专注模式，缺省视为关闭 */
   focusMode?: boolean
+  /** 侧边栏宽度（px），缺省视为 230 */
+  sidebarWidth?: number
+  /** 分屏预览右栏占比，缺省视为 0.5 */
+  splitRatio?: number
+  /** 自定义快捷键：命令 id → 绑定串（null 表示解绑）；只存与默认不同的覆盖 */
+  keybindings?: Record<string, string | null>
 }
 
 export const ENCODING_CHOICES: ChoosableEncoding[] = ['utf-8', 'utf-8-bom', 'gbk', 'gb18030', 'big5']
@@ -646,6 +735,8 @@ export interface FileApi {
   replaceWorkspace(input: WorkspaceReplaceInput): Promise<FileResult<WorkspaceReplaceResult>>
   /** 扫描文件夹内文档之间的链接（反向链接与关系图的数据来源） */
   scanLinks(dir: string): Promise<FileResult<LinkIndexResult>>
+  /** 扫描文件夹内文档 front matter 的标签（标签页的数据来源） */
+  scanTags(dir: string): Promise<FileResult<TagIndexResult>>
   saveAs(text: string, meta: FileMeta): Promise<FileResult<FileSnapshot>>
   read(path: string): Promise<FileResult<FileSnapshot>>
   /** 按用户指定的编码重新解码磁盘上的原始字节：检测结果错判时的纠正入口 */
@@ -671,6 +762,10 @@ export interface FileApi {
   exportBatch(input: BatchExportInput): Promise<FileResult<BatchExportResult>>
   /** 导出 EPUB：多个章节打包成一本电子书 */
   exportEpub(input: EpubExportInput): Promise<FileResult<EpubExportResult>>
+  /** 导出 Word 文档（DOCX）：标题层级、列表、表格与图片 */
+  exportDocx(input: DocxExportInput): Promise<FileResult<DocxExportResult>>
+  /** 导出 OPML 大纲（标题树，给大纲工具/迁移用） */
+  exportOpml(input: OpmlExportInput): Promise<FileResult<string>>
   /** 自定义导出主题与页面模板：列出 userData 里的全部条目 */
   styleList(): Promise<CustomStyleLibrary>
   /** 新建或覆盖保存一条主题/模板 */
@@ -699,6 +794,10 @@ export interface FileApi {
   /** 菜单粘贴优先用的 HTML 形式：和编辑器里的 Ctrl+V 一样对齐 Typora 的富文本粘贴 */
   clipboardReadHtml(): Promise<string>
   clipboardWriteText(text: string): Promise<boolean>
+  /** 同时写 HTML 与纯文本两种格式：菜单复制/剪切粘到 Word 等富文本应用不丢格式 */
+  clipboardWriteHtml(html: string, text: string): Promise<boolean>
+  /** 把 PNG 字节写进剪贴板（图片管理器的"复制图片"） */
+  clipboardWriteImage(bytes: Uint8Array): Promise<boolean>
   /** 视图菜单：全屏 / 置顶 / 开发者工具 / 缩放，都作用于主窗口 */
   toggleFullScreen(): Promise<boolean>
   setAlwaysOnTop(on: boolean): Promise<boolean>
@@ -733,6 +832,7 @@ export const CHANNEL = {
   searchWorkspace: 'mdforge:fs:search',
   replaceWorkspace: 'mdforge:fs:replace',
   scanLinks: 'mdforge:fs:scan-links',
+  scanTags: 'mdforge:fs:scan-tags',
   saveAs: 'mdforge:fs:save-as',
   read: 'mdforge:fs:read',
   readAs: 'mdforge:fs:read-as',
@@ -756,6 +856,8 @@ export const CHANNEL = {
   chooseExportFolder: 'mdforge:export:choose-folder',
   exportBatch: 'mdforge:export:batch',
   exportEpub: 'mdforge:export:epub',
+  exportDocx: 'mdforge:export:docx',
+  exportOpml: 'mdforge:export:opml',
   styleList: 'mdforge:style:list',
   styleSave: 'mdforge:style:save',
   styleDelete: 'mdforge:style:delete',
@@ -771,6 +873,8 @@ export const CHANNEL = {
   clipboardRead: 'mdforge:clipboard:read',
   clipboardReadHtml: 'mdforge:clipboard:read-html',
   clipboardWrite: 'mdforge:clipboard:write',
+  clipboardWriteHtml: 'mdforge:clipboard:write-html',
+  clipboardWriteImage: 'mdforge:clipboard:write-image',
   toggleFullScreen: 'mdforge:window:full-screen',
   setAlwaysOnTop: 'mdforge:window:always-on-top',
   openDevTools: 'mdforge:window:dev-tools',

@@ -26,6 +26,8 @@ export interface AssetsViewDeps {
   /** 磁盘引用被改写后，让工作区同步打开的标签 */
   syncAfterWrite(touched: readonly string[]): void
   readAsset(path: string): Promise<FileResult<Uint8Array>>
+  /** 把 PNG 字节写进系统剪贴板（"复制"按钮） */
+  copyImage(bytes: Uint8Array): Promise<boolean>
   activeDocPath(): string | null
   /** 定位到当前文档某一行（1 起） */
   locate(line: number): void
@@ -338,6 +340,15 @@ export function createAssetsView(deps: AssetsViewDeps): AssetsView {
       foot.appendChild(locate)
     }
 
+    const copy = document.createElement('button')
+    copy.type = 'button'
+    copy.className = 'asset-action'
+    copy.dataset.action = 'assets-copy'
+    copy.textContent = '复制'
+    copy.title = '复制图片到剪贴板（统一为 PNG）'
+    copy.addEventListener('click', () => void copyAssetImage(asset))
+    foot.appendChild(copy)
+
     const reveal = document.createElement('button')
     reveal.type = 'button'
     reveal.className = 'asset-action'
@@ -586,6 +597,43 @@ export function createAssetsView(deps: AssetsViewDeps): AssetsView {
       image.onerror = () => reject(new Error('图片无法解码'))
       image.src = src
     })
+  }
+
+  /** 复制到剪贴板：PNG 原样送出，其余格式经画布统一转成 PNG（系统剪贴板的通用图片格式） */
+  async function copyAssetImage(asset: ManagedAsset): Promise<void> {
+    const source = await deps.readAsset(asset.path)
+    if (!source.ok) {
+      deps.fail(source.error.message)
+      return
+    }
+    try {
+      const ext = extOf(asset.name)
+      const bytes = ext === '.png' ? source.value : await rasterizeToPng(source.value, mimeOfExt(ext))
+      const ok = await deps.copyImage(bytes)
+      if (ok) deps.notify(`已复制图片：${asset.name}`)
+      else deps.fail(`复制图片失败：${asset.name}`)
+    } catch {
+      deps.fail(`复制图片失败：${asset.name}（这个格式转不成 PNG）`)
+    }
+  }
+
+  async function rasterizeToPng(bytes: Uint8Array, mime: string): Promise<Uint8Array> {
+    const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mime }))
+    let image: HTMLImageElement
+    try {
+      image = await loadImage(url)
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, image.naturalWidth)
+    canvas.height = Math.max(1, image.naturalHeight)
+    const context = canvas.getContext('2d')
+    if (context === null) throw new Error('当前环境不支持画布')
+    context.drawImage(image, 0, 0)
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (blob === null) throw new Error('编码失败')
+    return new Uint8Array(await blob.arrayBuffer())
   }
 
   return {

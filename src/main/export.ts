@@ -6,6 +6,7 @@ import {
   MARGIN_MM,
   type ExportInput,
   type ExportOutcome,
+  type OpmlExportInput,
   type PageMargin,
   type TextExportInput,
   type WriteRequest
@@ -24,11 +25,11 @@ const TEXT_FILTERS: Record<'md' | 'txt', Electron.FileFilter[]> = {
   txt: [{ name: '纯文本', extensions: ['txt'] }]
 }
 
-function safeBase(baseName: string): string {
+export function safeBase(baseName: string): string {
   return baseName.replace(/[\\/:*?"<>|]/g, '_') || '未命名'
 }
 
-function startDir(docPath: string | null): string {
+export function startDir(docPath: string | null): string {
   return docPath ? path.dirname(path.resolve(docPath)) : process.cwd()
 }
 
@@ -47,7 +48,7 @@ async function chooseTarget(kind: 'html' | 'pdf', input: ExportInput, parent: Br
   return pickFile(title, `${safeBase(input.baseName)}.${kind}`, startDir(input.docPath), FILTERS[kind], parent)
 }
 
-async function pickFile(
+export async function pickFile(
   title: string,
   fileName: string,
   dir: string,
@@ -131,4 +132,18 @@ export async function exportText(input: TextExportInput, parent: BrowserWindow |
   const request: WriteRequest = { path: target, text: input.text, meta: input.meta, baseHash: '', force: true }
   const snapshot = await writeDoc(request)
   return snapshot.path
+}
+
+/** 导出 OPML 大纲：XML 由渲染进程生成，这里只挑位置、写 UTF-8 */
+export async function exportOpml(input: OpmlExportInput, parent: BrowserWindow | null): Promise<string> {
+  const target = await pickFile(
+    '导出 OPML 大纲',
+    `${safeBase(input.baseName)}.opml`,
+    startDir(input.docPath),
+    [{ name: 'OPML', extensions: ['opml'] }],
+    parent
+  )
+  grantPath(target)
+  await writeFile(target, input.opml, 'utf8')
+  return target
 }
