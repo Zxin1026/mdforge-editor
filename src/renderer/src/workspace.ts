@@ -8,8 +8,13 @@ import {
   PAPER_SIZES,
   normalizeContentWidth,
   normalizeFontSize,
+  normalizeViewMode,
   normalizeZoom,
   type AppTheme,
+  type AssetRenameInput,
+  type AssetRenameResult,
+  type AssetReplaceInput,
+  type AssetReplaceResult,
   type AssetReport,
   type ChoosableEncoding,
   type ContentWidth,
@@ -19,12 +24,15 @@ import {
   type ExportOptions,
   type ExternalChange,
   type FileErrorInfo,
+  type FileResult,
   type FileSnapshot,
-  type LinkIndexResult
+  type LinkIndexResult,
+  type ViewMode
 } from '../../shared/ipc'
 import type { EditorAction, EditorFacts } from './editor/actions'
 import type { LinkTarget } from './editor/links'
 import { askDialog } from './dialog'
+import { refRewriteEdits } from './asset-refs'
 import { collectOutline } from './editor/outline'
 import { clearMermaidCache } from './editor/mermaid'
 import { createEditor, type MarkdownEditor } from './editor/view'
@@ -39,12 +47,17 @@ import {
   THEMES,
   THEME_LABELS
 } from './export/options'
-import { buildHtml, deriveTitle, renderText } from './export/html'
+import { buildHtml, deriveTitle, renderBody, renderText } from './export/html'
+import { cssFor } from './export/export-css'
+import { buildSitePlan } from './export/site'
+import { frontMatterTextOf, parseFrontMatter, readFields } from './editor/frontmatter-yaml'
 import type { MenuEntry, MenuHandle } from './menu'
 import { openMenu } from './menu'
 import { createSidePanel, type LinksView, type SidePanel } from './side-panel'
 import type { ReplaceRequest } from './side/search-view'
 import { inspectDocument, type Issue } from './editor/inspect'
+import { createSplitPreview, themeForApp, type SplitPreview } from './split-preview'
+import { currentTheme } from './editor/theme-runtime'
 import { createTabBar, type TabBar, type TabItem } from './tabs'
 import {
   afterSave,
@@ -138,6 +151,12 @@ export class Workspace {
   /** 导航历史：后退/前进的站点栈 */
   private navStack: NavPoint[] = []
   private navIndex = -1
+  /** 视图模式与写作模式：整窗共用一份，分屏预览挂在编辑区右侧 */
+  private viewMode: ViewMode = 'edit'
+  private typewriterOn = false
+  private focusOn = false
+  private sourceOn = false
+  private readonly preview: SplitPreview
 
   private readonly tabs_: TabBar
   private readonly side_: SidePanel
@@ -146,6 +165,7 @@ export class Workspace {
   private lintTimer: number | undefined
 
   constructor(private readonly deps: WorkspaceDeps) {
+    this.preview = createSplitPreview(deps.editorHost)
     this.tabs_ = createTabBar(deps.tabbar, {
       onSelect: (id) => this.activate(id),
       onClose: (id) => void this.close(id),
@@ -187,7 +207,29 @@ export class Workspace {
       },
       onPickBacklink: (path, line) => void this.openHit(path, line, 1, 0),
       onRefreshLinks: () => void this.refreshBacklinks(true),
-      onOpenGraph: () => void this.showGraph()
+      onOpenGraph: () => void this.showGraph(),
+      assets: {
+        root: () => this.assetRoot(),
+        rootLabel: () => {
+          const root = this.assetRoot()
+          return root === null ? '' : baseNameOf(root)
+        },
+        openFolder: () => void this.openFolderViaDialog(),
+        list: (root) => window.mdforge.listAssets(root),
+        rename: (input) => this.runAssetRename(input),
+        replace: (input) => this.runAssetReplace(input),
+        dirtyDocs: () =>
+          this.tabs
+            .filter((tab) => tab.state.path !== null && isDirty(tab.state))
+            .map((tab) => tab.state.path as string),
+        syncAfterWrite: (touched) => void this.syncAfterAssetWrite(touched),
+        readAsset: (path) => window.mdforge.readAsset(path),
+        activeDocPath: () => this.active()?.state.path ?? null,
+        locate: (line) => this.locateInActive(line),
+        reveal: (path) => this.revealPath(path),
+        notify: (text) => this.setMessage(text),
+        fail: (message) => this.notify({ code: 'unknown', message })
+      }
     })
     deps.metaEl.addEventListener('click', () => this.toggleMetaMenu())
   }
@@ -228,6 +270,7 @@ export class Workspace {
           this.refreshName()
           this.renderTabs()
           this.scheduleLint()
+          this.schedulePreview(tab)
         }
         this.schedulePersist()
         this.scheduleDraft()
@@ -244,6 +287,10 @@ export class Workspace {
     )
     tab.editor.setText(state.text)
     tab.editor.setDocPath(state.path ?? '')
+    tab.editor.setSourceMode(this.sourceOn)
+    tab.editor.setTypewriter(this.typewriterOn)
+    tab.editor.setReadOnly(this.viewMode === 'read')
+    tab.editor.setFocusMode(this.focusOn && this.viewMode !== 'read')
     this.tabs.push(tab)
     if (state.path) void window.mdforge.watch(state.path)
     return tab
@@ -346,6 +393,7 @@ export class Workspace {
     }
     tab.editor.focus()
     this.refreshChrome()
+    this.refreshPreview()
     this.schedulePersist()
     // 检查结果与反向链接都跟着当前文档走（静默检查：不在面板上闪"正在检查"）
     void this.runCheck(false)
@@ -519,6 +567,76 @@ export class Workspace {
   private revealPath(path: string): void {
     void window.mdforge.reveal(path)
     this.setMessage(`已在文件夹中显示：${path}`)
+  }
+
+  // ---- 图片资源管理器 ----
+
+  /** 资源扫描根：打开的文件夹优先，退回当前文档所在目录 */
+  private assetRoot(): string | null {
+    if (this.folderRoot !== null) return this.folderRoot
+    const docPath = this.active()?.state.path ?? null
+    return docPath === null ? null : dirNameOf(docPath)
+  }
+
+  /** 视图 → 图片资源管理器：面板切到图片页 */
+  openAssetsView(): void {
+    this.setSidebarVisible(true)
+    this.side_.setMode('assets')
+  }
+
+  /** 图片页里"定位"：跳到当前文档的某一行（1 起） */
+  private locateInActive(line: number): void {
+    const tab = this.active()
+    if (!tab || line <= 0) return
+    const doc = tab.editor.state().doc
+    const row = doc.line(Math.min(line, doc.lines))
+    this.noteNavPoint()
+    tab.editor.jumpTo(row.from)
+  }
+
+  private async runAssetRename(input: AssetRenameInput): Promise<FileResult<AssetRenameResult>> {
+    const response = await window.mdforge.renameAssets(input)
+    if (response.ok) this.afterAssetMoves(response.value.files)
+    return response
+  }
+
+  private async runAssetReplace(input: AssetReplaceInput): Promise<FileResult<AssetReplaceResult>> {
+    const response = await window.mdforge.replaceAsset(input)
+    if (response.ok) {
+      this.afterAssetMoves([{ from: input.path, path: response.value.path }])
+    }
+    return response
+  }
+
+  /**
+   * 改名/转格式之后：主进程跳过有未保存修改的文档，
+   * 这里把它们的内存缓冲改成同样的引用——保存时自然写对，也不会撞冲突框。
+   */
+  private afterAssetMoves(files: ReadonlyArray<{ from: string; path: string }>): void {
+    const moves = files
+      .filter((file) => file.path !== file.from)
+      .map((file) => ({ from: file.from, to: file.path }))
+    if (moves.length === 0) return
+    for (const tab of this.tabs) {
+      const docPath = tab.state.path
+      if (docPath === null || !isDirty(tab.state)) continue
+      const edits = refRewriteEdits(tab.editor.state().doc.toString(), docPath, moves)
+      if (edits.length === 0) continue
+      if (tab.editor.applyEdits(edits) > 0 && tab.active) this.scheduleLint()
+    }
+  }
+
+  /** 磁盘引用被改写过的文档：干净标签跟着重载，文件树刷新 */
+  private async syncAfterAssetWrite(touched: readonly string[]): Promise<void> {
+    const keys = new Set(touched.map((path) => path.toLowerCase()))
+    for (const tab of [...this.tabs]) {
+      const docPath = tab.state.path
+      if (docPath === null || !keys.has(docPath.toLowerCase())) continue
+      if (isDirty(tab.state)) continue
+      await this.reloadTab(tab)
+    }
+    void this.side_.reloadFiles()
+    this.refreshChrome()
   }
 
   /** 视图 → 文档检查：面板切到检查页并跑一次 */
@@ -795,6 +913,10 @@ export class Workspace {
       { label: '导出 Markdown 副本…', run: () => void this.runExport('md') },
       { label: '导出纯文本…', hint: '去标记后写 txt', run: () => void this.runExport('txt') },
       { divider: true, label: '' },
+      { label: '导出文件夹为 HTML…', hint: '整个文件夹批量导出', run: () => void this.publishBatch(false) },
+      { label: '导出静态站点…', hint: '含导航页与搜索索引', run: () => void this.publishBatch(true) },
+      { label: '导出 EPUB…', hint: '当前文档或整个文件夹', run: () => void this.publishEpub() },
+      { divider: true, label: '' },
       { label: '导出选项', children: () => this.exportOptionEntries() }
     ]
   }
@@ -902,6 +1024,148 @@ export class Workspace {
     return this.tabs.some((tab) => isDirty(tab.state) || isUnsavedNew(tab.state))
   }
 
+  // ---- 发布：批量导出 / 静态站点 / EPUB ----
+
+  /** 发布数据来源：链接索引给文档清单，已打开的标签优先用内存版本（可能比磁盘新） */
+  private async publishDocs(): Promise<Array<{ path: string; text: string }> | null> {
+    const dir = this.folderRoot
+    if (dir === null) {
+      this.setMessage('先在「文件 → 打开文件夹…」选一个文件夹，再导出')
+      return null
+    }
+    const index = await this.ensureLinkIndex(true)
+    if (index === null) return null
+    const memory = new Map(
+      this.tabs.filter((tab) => tab.state.path !== null).map((tab) => [tab.state.path!.toLowerCase(), tab.state.text])
+    )
+    const docs: Array<{ path: string; text: string }> = []
+    for (const file of index.files) {
+      const cached = memory.get(file.path.toLowerCase())
+      if (cached !== undefined) {
+        docs.push({ path: file.path, text: cached })
+        continue
+      }
+      const result = await window.mdforge.read(file.path)
+      if (result.ok) docs.push({ path: file.path, text: result.value.text })
+    }
+    if (docs.length === 0) {
+      this.setMessage('文件夹里没有可导出的文档')
+      return null
+    }
+    return docs
+  }
+
+  /** 文件 → 导出 → 文件夹为 HTML / 静态站点 */
+  async publishBatch(site: boolean): Promise<void> {
+    this.clearNotify()
+    const docs = await this.publishDocs()
+    if (docs === null) return
+    const dir = this.folderRoot!
+    const chosen = await window.mdforge.chooseExportFolder()
+    if (!chosen.ok) {
+      this.notify(chosen.error)
+      return
+    }
+    if (chosen.value === null) {
+      this.setMessage('已取消导出')
+      return
+    }
+
+    this.setMessage(`正在导出 ${docs.length} 个文档…`)
+    try {
+      const plan = await buildSitePlan({ root: dir, docs, options: this.exportOptions, site })
+      const response = await window.mdforge.exportBatch({
+        outDir: chosen.value,
+        files: plan.files,
+        extras: plan.extras,
+        options: this.exportOptions
+      })
+      if (!response.ok) {
+        this.notify(response.error)
+        return
+      }
+      const outcome = response.value
+      const problems = outcome.failed.length + plan.skipped.length
+      const note =
+        problems > 0 ? `（${problems} 个页面没写出：${shorten(plan.skipped[0] ?? outcome.failed[0].detail ?? '原因不明')}）` : ''
+      this.setMessage(`已导出 ${outcome.written} 个文件到 ${outcome.outDir}${assetNote(outcome.assets, false)}${note}`)
+      this.revealTarget = outcome.outDir
+    } catch (error) {
+      this.notify({ code: 'unknown', message: `导出失败：${error instanceof Error ? error.message : String(error)}` })
+    }
+    this.renderStatus()
+  }
+
+  /** 文件 → 导出 → EPUB：单篇或整本 */
+  async publishEpub(): Promise<void> {
+    this.clearNotify()
+    const active = this.active()
+    let docs: Array<{ path: string; text: string }> = []
+    let title = ''
+
+    if (this.folderRoot !== null) {
+      const scope = await askDialog<'folder' | 'doc' | 'cancel'>({
+        title: '导出 EPUB',
+        body: baseNameOf(this.folderRoot),
+        note: '整本导出会把文件夹里每篇文档当作一章，按文件路径排序。',
+        options: [
+          { label: '整个文件夹成一本书', value: 'folder', kind: 'default' },
+          { label: '只导出当前文档', value: 'doc' },
+          { label: '取消', value: 'cancel' }
+        ],
+        cancelValue: 'cancel'
+      })
+      if (scope === 'cancel') return
+      if (scope === 'folder') {
+        const collected = await this.publishDocs()
+        if (collected === null) return
+        docs = collected
+        title = baseNameOf(this.folderRoot)
+      }
+    }
+
+    if (docs.length === 0) {
+      if (!active) {
+        this.setMessage('没有可导出的文档')
+        return
+      }
+      docs = [{ path: active.state.path ?? '', text: active.state.text }]
+      title = displayNameOf(active.state).replace(/\.[^.]+$/, '') || '未命名'
+    }
+
+    try {
+      const chapters = []
+      for (const doc of docs) {
+        const fallback = (doc.path === '' ? doc.path : baseNameOf(doc.path)).replace(/\.[^.]+$/, '') || '未命名'
+        chapters.push({
+          title: deriveTitle(doc.text, fallback),
+          html: await renderBody(doc.text, this.exportOptions),
+          docPath: doc.path === '' ? null : doc.path
+        })
+      }
+      const firstText = docs[0]?.text ?? ''
+      const front = frontMatterTextOf(firstText)
+      const author = front === null ? '' : readFields(parseFrontMatter(front)).author
+      const response = await window.mdforge.exportEpub({
+        title,
+        author: author === '' ? undefined : author,
+        chapters,
+        css: cssFor(this.exportOptions.theme)
+      })
+      if (!response.ok) {
+        this.notify(response.error)
+        return
+      }
+      const outcome = response.value
+      const imageNote = outcome.images > 0 ? `（内联 ${outcome.images} 张图片）` : ''
+      this.setMessage(`已导出 EPUB：${outcome.path}${imageNote}`)
+      this.revealTarget = outcome.path
+    } catch (error) {
+      this.notify({ code: 'unknown', message: `EPUB 导出失败：${error instanceof Error ? error.message : String(error)}` })
+    }
+    this.renderStatus()
+  }
+
   dropFiles(paths: readonly string[]): void {
     for (const path of paths) void this.openPath(path)
   }
@@ -959,18 +1223,92 @@ export class Workspace {
   }
 
   sourceMode(): boolean {
-    return this.active()?.editor.sourceMode() ?? false
+    return this.sourceOn
+  }
+
+  setSourceMode(on: boolean): void {
+    if (this.sourceOn === on) return
+    this.sourceOn = on
+    for (const tab of this.tabs) tab.editor.setSourceMode(on)
   }
 
   toggleSourceMode(): void {
+    this.setSourceMode(!this.sourceOn)
+  }
+
+  // ---- 视图模式：分屏 / 阅读 / 打字机 / 专注 ----
+
+  viewModeOf(): ViewMode {
+    return this.viewMode
+  }
+
+  setViewMode(mode: ViewMode): void {
+    if (this.viewMode === mode) return
+    const previous = this.viewMode
+    this.viewMode = mode
+    // 分屏的左半就是源码视图：进入时切到源码；回到编辑模式时还原精排视图
+    if (mode === 'split') this.setSourceMode(true)
+    else if (mode === 'edit' && previous !== 'edit') this.setSourceMode(false)
+    this.applyViewMode()
+    this.schedulePersist()
+    this.setMessage(
+      mode === 'split' ? '分屏预览：左栏源码 · 右栏渲染结果' : mode === 'read' ? '阅读模式：只读，切换回编辑即可继续写' : '编辑模式'
+    )
+  }
+
+  typewriter(): boolean {
+    return this.typewriterOn
+  }
+
+  toggleTypewriter(): void {
+    this.typewriterOn = !this.typewriterOn
+    this.applyViewMode()
+    this.schedulePersist()
+    this.setMessage(this.typewriterOn ? '打字机模式已开启：光标行始终居中' : '打字机模式已关闭')
+  }
+
+  focusMode(): boolean {
+    return this.focusOn
+  }
+
+  toggleFocusMode(): void {
+    this.focusOn = !this.focusOn
+    this.applyViewMode()
+    this.schedulePersist()
+    this.setMessage(this.focusOn ? '专注模式已开启：只突出当前段落' : '专注模式已关闭')
+  }
+
+  private applyViewMode(): void {
+    const split = this.viewMode === 'split'
+    this.deps.editorHost.classList.toggle('is-split', split)
+    this.preview.setVisible(split)
+    if (split) this.refreshPreview()
+    const read = this.viewMode === 'read'
+    for (const tab of this.tabs) {
+      tab.editor.setReadOnly(read)
+      tab.editor.setFocusMode(this.focusOn && !read)
+      tab.editor.setTypewriter(this.typewriterOn)
+    }
+  }
+
+  /** 分屏右栏重绘：编辑改动走防抖，切标签/进分屏立即重绘 */
+  private schedulePreview(tab: DocTab): void {
+    if (this.viewMode !== 'split' || !tab.active) return
+    this.preview.schedule(tab.state.text, tab.state.path)
+  }
+
+  private refreshPreview(): void {
+    if (this.viewMode !== 'split') return
     const tab = this.active()
-    if (tab) tab.editor.setSourceMode(!tab.editor.sourceMode())
+    if (tab) this.preview.update(tab.state.text, tab.state.path)
   }
 
   /** 深浅色切换后重画按主题渲染的块（mermaid 等），并丢掉旧配色的缓存 */
   applyTheme(): void {
     clearMermaidCache()
     for (const tab of this.tabs) tab.editor.refreshDecorations()
+    this.preview.setTheme(themeForApp(currentTheme()))
+    this.refreshPreview()
   }
 
   zoom(): number {
@@ -1561,6 +1899,8 @@ export class Workspace {
       if (!this.tabs.includes(tab)) return
       tab.editor.setIssues(report.issues)
       this.side_.showReport(report)
+      // 图片页要显示当前文档的缺图引用（一键定位）
+      this.side_.renderAssetIssues(report.issues.filter((issue) => issue.kind === 'missing-image'))
     } catch (error) {
       if (seq !== this.checkSeq) return
       this.notify({
@@ -1638,7 +1978,10 @@ export class Workspace {
       theme: this.deps.themeMode(),
       zoom: this.zoomLevel,
       fontSize: this.fontSizeLevel,
-      contentWidth: this.contentWidthMode
+      contentWidth: this.contentWidthMode,
+      viewMode: this.viewMode,
+      typewriter: this.typewriterOn,
+      focusMode: this.focusOn
     })
   }
 
@@ -1652,6 +1995,11 @@ export class Workspace {
     if (this.zoomLevel !== 1) void window.mdforge.setZoom(this.zoomLevel)
     this.fontSizeLevel = normalizeFontSize(session?.fontSize) ?? DEFAULT_FONT_SIZE
     this.contentWidthMode = normalizeContentWidth(session?.contentWidth) ?? DEFAULT_CONTENT_WIDTH
+    this.viewMode = normalizeViewMode(session?.viewMode) ?? 'edit'
+    this.typewriterOn = session?.typewriter === true
+    this.focusOn = session?.focusMode === true
+    if (this.viewMode === 'split') this.sourceOn = true
+    this.preview.setTheme(themeForApp(currentTheme()))
     this.applyViewPrefs()
     this.renderAutoSaveButton()
 
@@ -1675,6 +2023,8 @@ export class Workspace {
       this.activate(target?.id ?? this.tabs[this.tabs.length - 1].id)
     }
 
+    // 视图模式落在界面上：分屏右栏、只读、打字机与专注
+    this.applyViewMode()
     await this.restoreDrafts()
     if (this.autoSave) this.scheduleAutoSave()
   }
@@ -1689,6 +2039,11 @@ function formatTime(millis: number): string {
 function baseNameOf(target: string): string {
   const parts = target.split(/[\\/]/)
   return parts[parts.length - 1] || target
+}
+
+function dirNameOf(target: string): string {
+  const index = Math.max(target.lastIndexOf('/'), target.lastIndexOf('\\'))
+  return index <= 0 ? target : target.slice(0, index)
 }
 
 function shorten(text: string, limit = 30): string {

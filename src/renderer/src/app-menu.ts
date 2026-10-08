@@ -9,7 +9,8 @@ import {
   FONT_SIZES,
   type AppTheme,
   type ContentWidth,
-  type EditorFontSize
+  type EditorFontSize,
+  type ViewMode
 } from '../../shared/ipc'
 import { askDialog } from './dialog'
 import type { EditorAction, EditorFacts } from './editor/actions'
@@ -33,9 +34,16 @@ export interface AppMenuContext {
   editorFacts(): EditorFacts
   sourceMode(): boolean
   toggleSourceMode(): void
+  viewMode(): ViewMode
+  setViewMode(mode: ViewMode): void
+  typewriter(): boolean
+  toggleTypewriter(): void
+  focusMode(): boolean
+  toggleFocusMode(): void
   sidebar(): boolean
   toggleSidebar(): void
   inspect(): void
+  assetsManager(): void
   workspaceSearch(): void
   navBack(): void
   navForward(): void
@@ -219,7 +227,9 @@ function formatMenu(ctx: AppMenuContext): MenuBarMenu {
       { label: '加粗', hint: 'Ctrl+B', run: () => ctx.runEditor('bold') },
       { label: '斜体', hint: 'Ctrl+I', run: () => ctx.runEditor('italic') },
       { label: '删除线', hint: 'Ctrl+Shift+X', run: () => ctx.runEditor('strike') },
-      { label: '行内代码', hint: 'Ctrl+`', run: () => ctx.runEditor('inlineCode') }
+      { label: '行内代码', hint: 'Ctrl+`', run: () => ctx.runEditor('inlineCode') },
+      { divider: true, label: '' },
+      { label: '文档信息（Front Matter）…', run: () => ctx.runEditor('frontMatter') }
     ]
   }
 }
@@ -239,7 +249,36 @@ function viewMenu(ctx: AppMenuContext): MenuBarMenu {
           checked: ctx.sourceMode(),
           run: () => ctx.toggleSourceMode()
         },
+        {
+          label: '分屏预览',
+          hint: '左栏源码 · 右栏渲染',
+          checked: ctx.viewMode() === 'split',
+          keepOpen: true,
+          run: () => ctx.setViewMode(ctx.viewMode() === 'split' ? 'edit' : 'split')
+        },
+        {
+          label: '阅读模式',
+          hint: '只读，不动内容',
+          checked: ctx.viewMode() === 'read',
+          keepOpen: true,
+          run: () => ctx.setViewMode(ctx.viewMode() === 'read' ? 'edit' : 'read')
+        },
+        {
+          label: '打字机模式',
+          hint: '光标行始终居中',
+          checked: ctx.typewriter(),
+          keepOpen: true,
+          run: () => ctx.toggleTypewriter()
+        },
+        {
+          label: '专注模式',
+          hint: '只突出当前段落',
+          checked: ctx.focusMode(),
+          keepOpen: true,
+          run: () => ctx.toggleFocusMode()
+        },
         { label: '侧边栏', checked: ctx.sidebar(), keepOpen: true, run: () => ctx.toggleSidebar() },
+        { label: '图片资源管理器', run: () => ctx.assetsManager() },
         { label: '文档检查', run: () => ctx.inspect() },
         { divider: true, label: '' },
         {

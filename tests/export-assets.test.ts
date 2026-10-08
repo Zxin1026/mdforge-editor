@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { processHtmlAssets } from '../src/main/fs/export-assets'
+import { processHtmlAssets, safeRelative } from '../src/main/fs/export-assets'
 import { grantPath, resetFileStore } from '../src/main/fs/file-store'
 
 const PNG = Buffer.from(
@@ -154,5 +154,21 @@ describe('处理不了的引用', () => {
     })
     expect(result.report.copied).toBe(0)
     expect(existsSync(path.join(docDir, 'noimg.assets'))).toBe(false)
+  })
+})
+
+describe('导出相对路径清洗', () => {
+  it('正常子路径原样保留', () => {
+    expect(safeRelative('sub/a.html')).toBe('sub/a.html')
+    expect(safeRelative('sub\\a.html')).toBe('sub/a.html')
+    expect(safeRelative('./a.html')).toBe('a.html')
+  })
+
+  it('越界与非法路径拒绝', () => {
+    expect(safeRelative('../a.html')).toBeNull()
+    expect(safeRelative('sub/../../a.html')).toBeNull()
+    expect(safeRelative('C:/x.html')).toBeNull()
+    expect(safeRelative('')).toBeNull()
+    expect(safeRelative('./')).toBeNull()
   })
 })

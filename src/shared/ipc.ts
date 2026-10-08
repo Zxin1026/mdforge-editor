@@ -55,6 +55,15 @@ export function normalizeContentWidth(raw: unknown): ContentWidth | undefined {
   return CONTENT_WIDTHS.includes(raw as ContentWidth) ? (raw as ContentWidth) : undefined
 }
 
+/** 视图模式：编辑 / 左源码右渲染分屏 / 纯阅读（只读） */
+export type ViewMode = 'edit' | 'split' | 'read'
+
+export const VIEW_MODES: ViewMode[] = ['edit', 'split', 'read']
+
+export function normalizeViewMode(raw: unknown): ViewMode | undefined {
+  return VIEW_MODES.includes(raw as ViewMode) ? (raw as ViewMode) : undefined
+}
+
 export interface FileMeta {
   encoding: MdEncoding
   eol: Eol
@@ -202,6 +211,53 @@ export interface TextExportInput {
   extension: 'md' | 'txt'
 }
 
+/** 批量导出/静态站点：一个页面 */
+export interface BatchFileInput {
+  /** 输出目录内的相对路径（posix，含 .html），结构照搬源文件夹 */
+  relative: string
+  html: string
+  /** 图片解析基准文档；未保存的页面传 null */
+  docPath: string | null
+}
+
+export interface BatchExportInput {
+  outDir: string
+  files: BatchFileInput[]
+  /** index.html、search-index.json 这类附加文件，原样写出 */
+  extras: Array<{ relative: string; content: string }>
+  options: ExportOptions
+}
+
+export interface BatchExportResult {
+  outDir: string
+  written: number
+  /** 写失败的页面：相对路径 + 原因 */
+  failed: Array<{ relative: string; detail: string }>
+  assets: AssetReport
+}
+
+/** EPUB：每篇文档一章，图片统一内联进章节文件 */
+export interface EpubChapterInput {
+  title: string
+  html: string
+  docPath: string | null
+}
+
+export interface EpubExportInput {
+  title: string
+  author?: string
+  chapters: EpubChapterInput[]
+  /** 书籍样式表内容 */
+  css: string
+}
+
+export interface EpubExportResult {
+  path: string
+  chapters: number
+  /** 内联进书里的图片张数 */
+  images: number
+}
+
 /** 文档检查：渲染进程不碰磁盘，引用是否存在由主进程按授权模型判定 */
 export type ResourceState = 'ok' | 'missing' | 'directory' | 'outside' | 'unknown'
 
@@ -237,6 +293,68 @@ export interface AssetWriteResult {
   /** 相对文档目录的 POSIX 风格路径，可直接写进 Markdown 链接，如 assets/screenshot-2.png */
   relative: string
   name: string
+}
+
+/** 图片资源管理器：扫描根下的一张图片，尺寸与引用由主进程一次算好 */
+export interface ManagedAsset {
+  path: string
+  /** 相对扫描根的 POSIX 路径，可直接与 Markdown 引用比对 */
+  relative: string
+  name: string
+  size: number
+  width: number | null
+  height: number | null
+  /** 引用它的文档：相对根的 POSIX 路径 + 行号（1 起），同一处只留一条 */
+  refs: Array<{ doc: string; line: number }>
+}
+
+export interface AssetListResult {
+  root: string
+  assets: ManagedAsset[]
+  /** 扫描过的 Markdown 文档数 */
+  docs: number
+  /** 图片过多，列表被截断 */
+  truncated: boolean
+}
+
+export interface AssetRenameInput {
+  root: string
+  /** from 为图片绝对路径，to 为同目录下的新文件名 */
+  renames: Array<{ from: string; to: string }>
+  /** 有未保存修改的文档：磁盘上的引用不动，交给渲染进程改内存缓冲 */
+  skip: string[]
+}
+
+export interface AssetRenameFile {
+  from: string
+  /** 成功时是新路径，失败时保持原路径 */
+  path: string
+  kind: 'ok' | 'error'
+  /** error 时的原因 */
+  detail?: string
+}
+
+export interface AssetRenameResult {
+  files: AssetRenameFile[]
+  /** 磁盘上被改写过引用的文档路径 */
+  touched: string[]
+  refs: number
+}
+
+export interface AssetReplaceInput {
+  root: string
+  path: string
+  bytes: Uint8Array
+  /** 压缩转格式时的新文件名；缺省原地覆盖 */
+  newName?: string
+  skip: string[]
+}
+
+export interface AssetReplaceResult {
+  path: string
+  size: number
+  touched: string[]
+  refs: number
 }
 
 /** 文件树的一条：已授权文件夹里的文件或子目录 */
@@ -353,6 +471,12 @@ export interface SessionData {
   fontSize?: EditorFontSize
   /** 编辑区宽度，缺省视为铺满 */
   contentWidth?: ContentWidth
+  /** 视图模式，缺省视为编辑 */
+  viewMode?: ViewMode
+  /** 打字机模式，缺省视为关闭 */
+  typewriter?: boolean
+  /** 专注模式，缺省视为关闭 */
+  focusMode?: boolean
 }
 
 export const ENCODING_CHOICES: ChoosableEncoding[] = ['utf-8', 'utf-8-bom', 'gbk', 'gb18030', 'big5']
@@ -385,10 +509,24 @@ export interface FileApi {
   write(request: WriteRequest): Promise<FileResult<FileSnapshot>>
   /** 粘贴图片落盘：写入 <docPath 所在目录>/assets/，返回可直接插入的相对链接 */
   saveAsset(input: AssetWriteInput): Promise<FileResult<AssetWriteResult>>
+  /** 图片资源管理器：扫描根下的图片、尺寸与引用关系 */
+  listAssets(root: string): Promise<FileResult<AssetListResult>>
+  /** 批量重命名图片并改写文档里的引用 */
+  renameAssets(input: AssetRenameInput): Promise<FileResult<AssetRenameResult>>
+  /** 覆盖图片字节（压缩/转格式），可改名并改写引用 */
+  replaceAsset(input: AssetReplaceInput): Promise<FileResult<AssetReplaceResult>>
+  /** 压缩用：读取图片原始字节（canvas 走同源 blob，跨源协议图会污染画布） */
+  readAsset(path: string): Promise<FileResult<Uint8Array>>
   startupPaths(): Promise<string[]>
   exportHtml(input: ExportInput): Promise<FileResult<ExportOutcome>>
   exportPdf(input: ExportInput): Promise<FileResult<ExportOutcome>>
   exportText(input: TextExportInput): Promise<FileResult<string>>
+  /** 批量导出/静态站点：选一个输出目录（取消为 null） */
+  chooseExportFolder(): Promise<FileResult<string | null>>
+  /** 整个文件夹批量导出：按相对结构写页面与附加文件，图片按选项处理 */
+  exportBatch(input: BatchExportInput): Promise<FileResult<BatchExportResult>>
+  /** 导出 EPUB：多个章节打包成一本电子书 */
+  exportEpub(input: EpubExportInput): Promise<FileResult<EpubExportResult>>
   /** 文档检查用：批量判断引用路径是否存在，并列出 assets/ 下的实际文件 */
   probeResources(input: ResourceProbeInput): Promise<FileResult<ResourceProbeResult>>
   reveal(path: string): Promise<boolean>
@@ -440,6 +578,10 @@ export const CHANNEL = {
   readAs: 'mdforge:fs:read-as',
   write: 'mdforge:fs:write',
   saveAsset: 'mdforge:fs:save-asset',
+  listAssets: 'mdforge:asset:list',
+  renameAssets: 'mdforge:asset:rename',
+  replaceAsset: 'mdforge:asset:replace',
+  readAsset: 'mdforge:asset:read',
   startupPaths: 'mdforge:fs:startup-paths',
   grantDropped: 'mdforge:fs:grant-dropped',
   watch: 'mdforge:fs:watch',
@@ -451,6 +593,9 @@ export const CHANNEL = {
   exportHtml: 'mdforge:export:html',
   exportPdf: 'mdforge:export:pdf',
   exportText: 'mdforge:export:text',
+  chooseExportFolder: 'mdforge:export:choose-folder',
+  exportBatch: 'mdforge:export:batch',
+  exportEpub: 'mdforge:export:epub',
   probeResources: 'mdforge:fs:probe',
   reveal: 'mdforge:reveal',
   openExternal: 'mdforge:open-external',

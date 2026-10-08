@@ -4,8 +4,14 @@ import {
   CHANNEL,
   ENCODING_CHOICES,
   normalizeExportOptions,
+  type AssetRenameInput,
+  type AssetReplaceInput,
   type AssetWriteInput,
+  type BatchExportInput,
+  type BatchFileInput,
   type DocDraft,
+  type EpubChapterInput,
+  type EpubExportInput,
   type ExportInput,
   type FileErrorInfo,
   type FileMeta,
@@ -23,6 +29,9 @@ import { answerWindowClose } from './close-guard'
 import { FileOpError } from './fs/error'
 import { startupPaths } from './fs/startup'
 import { saveAsset } from './fs/asset-store'
+import { listAssets, readAssetBytes, renameAssets, replaceAsset } from './fs/asset-manager'
+import { chooseExportFolder, exportBatch } from './fs/batch-export'
+import { exportEpub } from './fs/epub'
 import { probeResources } from './fs/resource-check'
 import { draftClear, draftList, draftWrite } from './fs/draft-store'
 import { readSession, writeSession } from './fs/session'
@@ -204,6 +213,109 @@ function parseDraft(raw: unknown): DocDraft | null {
   }
 }
 
+/** 图片管理参数：root 与引用清单都要过形状检查，逐项校验交给 asset-manager */
+function parseAssetRoot(raw: unknown): string {
+  if (typeof raw !== 'string' || !raw || raw.includes('\0')) {
+    throw new FileOpError('invalid-path', '文件夹路径不合法')
+  }
+  return raw
+}
+
+function parseSkip(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string' && item !== '').slice(0, 500) : []
+}
+
+function parseAssetRename(raw: unknown): AssetRenameInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '重命名参数不合法')
+  const input = raw as Partial<AssetRenameInput>
+  const renames = Array.isArray(input.renames)
+    ? input.renames
+        .filter(
+          (item): item is { from: string; to: string } =>
+            item !== null && typeof item === 'object' && typeof item.from === 'string' && typeof item.to === 'string'
+        )
+        .slice(0, 200)
+    : []
+  return { root: parseAssetRoot(input.root), renames, skip: parseSkip(input.skip) }
+}
+
+function parseAssetReplace(raw: unknown): AssetReplaceInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '压缩参数不合法')
+  const input = raw as Partial<AssetReplaceInput>
+  if (typeof input.path !== 'string' || !(input.bytes instanceof Uint8Array)) {
+    throw new FileOpError('invalid-path', '压缩参数不完整')
+  }
+  if (input.newName !== undefined && typeof input.newName !== 'string') {
+    throw new FileOpError('invalid-path', '压缩参数不合法')
+  }
+  return {
+    root: parseAssetRoot(input.root),
+    path: input.path,
+    bytes: Buffer.from(input.bytes),
+    newName: input.newName,
+    skip: parseSkip(input.skip)
+  }
+}
+
+/** 批量导出参数：页面与附加文件逐个过形状检查，数量设上限 */
+function parseBatchExport(raw: unknown): BatchExportInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '导出参数不合法')
+  const input = raw as Partial<BatchExportInput>
+  if (typeof input.outDir !== 'string') throw new FileOpError('invalid-path', '导出位置不合法')
+  const files = Array.isArray(input.files)
+    ? input.files
+        .filter(
+          (item): item is BatchFileInput =>
+            item !== null && typeof item === 'object' && typeof item.relative === 'string' && typeof item.html === 'string'
+        )
+        .map((item) => ({
+          relative: item.relative,
+          html: item.html,
+          docPath: typeof item.docPath === 'string' ? item.docPath : null
+        }))
+        .slice(0, 1000)
+    : []
+  const extras = Array.isArray(input.extras)
+    ? input.extras
+        .filter(
+          (item): item is { relative: string; content: string } =>
+            item !== null && typeof item === 'object' && typeof item.relative === 'string' && typeof item.content === 'string'
+        )
+        .slice(0, 50)
+    : []
+  return { outDir: input.outDir, files, extras, options: normalizeExportOptions(input.options) }
+}
+
+/** EPUB 参数：章节数与单章体量都设上限，避免渲染进程失误塞爆内存 */
+const MAX_EPUB_CHAPTERS = 300
+
+function parseEpubExport(raw: unknown): EpubExportInput {
+  if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', 'EPUB 参数不合法')
+  const input = raw as Partial<EpubExportInput>
+  if (typeof input.title !== 'string' || typeof input.css !== 'string') {
+    throw new FileOpError('invalid-path', 'EPUB 参数不完整')
+  }
+  const chapters = Array.isArray(input.chapters)
+    ? input.chapters
+        .filter(
+          (item): item is EpubChapterInput =>
+            item !== null && typeof item === 'object' && typeof item.title === 'string' && typeof item.html === 'string'
+        )
+        .map((item) => ({
+          title: item.title,
+          html: item.html,
+          docPath: typeof item.docPath === 'string' ? item.docPath : null
+        }))
+        .slice(0, MAX_EPUB_CHAPTERS)
+    : []
+  return {
+    title: input.title,
+    author: typeof input.author === 'string' ? input.author : undefined,
+    chapters,
+    css: input.css
+  }
+}
+
 export function registerFileHandlers(getWindow: () => BrowserWindow | null): void {
   onExternalChange((change) => getWindow()?.webContents.send(CHANNEL.externalChange, change))
 
@@ -367,6 +479,18 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
 
   ipcMain.handle(CHANNEL.saveAsset, (_event, raw: unknown) => guarded(() => saveAsset(parseAssetInput(raw))))
 
+  ipcMain.handle(CHANNEL.listAssets, (_event, target: unknown) => guarded(() => listAssets(parseAssetRoot(target))))
+
+  ipcMain.handle(CHANNEL.renameAssets, (_event, raw: unknown) =>
+    guarded(() => renameAssets(parseAssetRename(raw)))
+  )
+
+  ipcMain.handle(CHANNEL.replaceAsset, (_event, raw: unknown) =>
+    guarded(() => replaceAsset(parseAssetReplace(raw)))
+  )
+
+  ipcMain.handle(CHANNEL.readAsset, (_event, target: unknown) => guarded(() => readAssetBytes(target)))
+
   ipcMain.handle(CHANNEL.startupPaths, () => startupPaths())
 
   ipcMain.handle(CHANNEL.watch, (_event, target: unknown) => {
@@ -418,6 +542,14 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
   )
   ipcMain.handle(CHANNEL.exportText, (_event, raw: unknown) =>
     guarded(() => exportText(parseTextExport(raw), getWindow()))
+  )
+
+  ipcMain.handle(CHANNEL.chooseExportFolder, () => guarded(() => chooseExportFolder(getWindow())))
+
+  ipcMain.handle(CHANNEL.exportBatch, (_event, raw: unknown) => guarded(() => exportBatch(parseBatchExport(raw))))
+
+  ipcMain.handle(CHANNEL.exportEpub, (_event, raw: unknown) =>
+    guarded(() => exportEpub(parseEpubExport(raw), getWindow()))
   )
   ipcMain.handle(CHANNEL.probeResources, (_event, raw: unknown) => guarded(() => probeResources(parseProbeInput(raw))))
 

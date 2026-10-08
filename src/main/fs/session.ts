@@ -6,6 +6,7 @@ import {
   normalizeExportOptions,
   normalizeFontSize,
   normalizeTheme,
+  normalizeViewMode,
   normalizeZoom,
   type SessionData
 } from '../../shared/ipc'
@@ -41,7 +42,10 @@ export async function readSession(): Promise<SessionData | null> {
       theme: normalizeTheme(data.theme),
       zoom: normalizeZoom(data.zoom),
       fontSize: normalizeFontSize(data.fontSize),
-      contentWidth: normalizeContentWidth(data.contentWidth)
+      contentWidth: normalizeContentWidth(data.contentWidth),
+      viewMode: normalizeViewMode(data.viewMode),
+      typewriter: typeof data.typewriter === 'boolean' ? data.typewriter : undefined,
+      focusMode: typeof data.focusMode === 'boolean' ? data.focusMode : undefined
     }
   } catch {
     return null
@@ -61,7 +65,10 @@ export async function writeSession(session: SessionData): Promise<void> {
     theme: normalizeTheme(session.theme),
     zoom: normalizeZoom(session.zoom),
     fontSize: normalizeFontSize(session.fontSize),
-    contentWidth: normalizeContentWidth(session.contentWidth)
+    contentWidth: normalizeContentWidth(session.contentWidth),
+    viewMode: normalizeViewMode(session.viewMode),
+    typewriter: typeof session.typewriter === 'boolean' ? session.typewriter : undefined,
+    focusMode: typeof session.focusMode === 'boolean' ? session.focusMode : undefined
   }
   const file = sessionFile()
   await fs.mkdir(path.dirname(file), { recursive: true })

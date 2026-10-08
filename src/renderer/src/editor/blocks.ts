@@ -1,5 +1,6 @@
 import { EditorView, WidgetType } from '@codemirror/view'
 import katex from 'katex'
+import { openFrontMatterEditor } from '../frontmatter-dialog'
 import { renderCellInline } from './cell-inline'
 import { setFrontMatterCollapsed } from './frontmatter'
 import { openLightbox } from './lightbox'
@@ -263,7 +264,7 @@ function buildTable(model: TableModel): HTMLElement {
   return table
 }
 
-/** front matter 的折叠/展开开关：折叠时占满整块，展开时只是行尾的一个小按钮 */
+/** front matter 的折叠/展开开关与表单编辑入口 */
 export class FrontMatterWidget extends WidgetType {
   constructor(
     readonly lines: number,
@@ -284,6 +285,22 @@ export class FrontMatterWidget extends WidgetType {
   }
 
   override toDOM(view: EditorView): HTMLElement {
+    const wrap = document.createElement('span')
+    wrap.className = 'mdf-fm-widget'
+
+    const edit = document.createElement('button')
+    edit.type = 'button'
+    edit.className = 'mdf-fm-edit'
+    edit.dataset.action = 'fm-edit'
+    edit.textContent = '编辑信息'
+    edit.title = '用表单编辑标题、作者、日期、标签与摘要'
+    edit.addEventListener('mousedown', (event) => event.stopPropagation())
+    edit.addEventListener('click', (event) => {
+      event.preventDefault()
+      void openFrontMatterEditor(view)
+    })
+    wrap.appendChild(edit)
+
     const button = document.createElement('button')
     button.type = 'button'
     button.className = this.collapsed ? 'mdf-fm-collapsed' : 'mdf-fm-toggle'
@@ -301,7 +318,8 @@ export class FrontMatterWidget extends WidgetType {
         userEvent: 'select'
       })
     })
-    return button
+    wrap.appendChild(button)
+    return wrap
   }
 
   override ignoreEvent(): boolean {

@@ -241,6 +241,35 @@ body {
   inset: 0;
 }
 
+/* 分屏：左栏编辑（源码），右栏渲染结果 */
+.editor-host.is-split .editor-mount {
+  right: 50%;
+}
+
+.split-preview {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 50%;
+  background: var(--mdf-bg);
+  border-left: 1px solid var(--mdf-border);
+}
+
+.split-preview-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--mdf-panel);
+  border: 0;
+}
+
+/* 专注模式：非当前段落淡化 */
+.cm-line.mdf-focus-dim {
+  opacity: 0.3;
+  transition: opacity 0.15s ease;
+}
+
 .editor-host .cm-editor {
   height: 100%;
   background: var(--mdf-bg);
@@ -564,7 +593,8 @@ body {
   color: inherit;
 }
 
-.mdf-fm-toggle {
+.mdf-fm-toggle,
+.mdf-fm-edit {
   margin-left: 8px;
   padding: 0 6px;
   font: inherit;
@@ -577,9 +607,19 @@ body {
   vertical-align: 0.1em;
 }
 
-.mdf-fm-toggle:hover {
+.mdf-fm-toggle:hover,
+.mdf-fm-edit:hover {
   color: var(--mdf-accent);
   border-color: var(--mdf-accent);
+}
+
+/* front matter 行尾的两个小按钮（编辑信息 / 折叠） */
+.mdf-fm-widget {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: 0.1em;
 }
 
 .mdf-fm-collapsed {
@@ -2097,4 +2137,277 @@ body {
   padding: 20px 10px 10px;
   font-size: 13px;
   color: var(--mdf-muted);
+}
+
+/* ==========================================================================
+ * 表单对话框（重命名 / 压缩 / front matter）：沿用确认框的底衬与按钮
+ * ========================================================================== */
+
+.mdf-form-dialog {
+  width: min(520px, 100%);
+}
+
+.mdf-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mdf-form-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.mdf-form-label {
+  font-size: 13px;
+  color: var(--mdf-muted);
+}
+
+.mdf-form-input {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--mdf-fg);
+  background: var(--mdf-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 5px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.mdf-form-input:focus {
+  border-color: var(--mdf-accent);
+}
+
+.mdf-form-area {
+  font-family: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  letter-spacing: 0;
+  line-height: 1.5;
+  resize: vertical;
+  grid-column: 2;
+}
+
+.mdf-form-check {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.mdf-form-hint {
+  grid-column: 2;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--mdf-muted);
+}
+
+.mdf-form-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--mdf-error);
+}
+
+/* front matter 对话框：切换原始 YAML 的按钮靠左，与取消/保存分开 */
+.mdf-fm-toggle-btn {
+  margin-right: auto;
+}
+
+.mdf-fm-raw {
+  min-height: 190px;
+}
+
+/* ==========================================================================
+ * 图片资源管理器：图片列表、缺失引用与批量操作
+ * ========================================================================== */
+
+.files-note.is-error {
+  color: var(--mdf-error);
+}
+
+.assets-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px 6px;
+  padding: 3px 6px;
+}
+
+.assets-summary {
+  padding: 0 2px 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--mdf-muted);
+}
+
+.assets-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 6px;
+}
+
+.assets-toolbar .search-input {
+  flex: 1 1 100%;
+}
+
+.assets-toolbar .search-go {
+  font-size: 11px;
+  padding: 2px 7px;
+}
+
+.assets-selected {
+  font-size: 11px;
+  color: var(--mdf-muted);
+}
+
+.assets-missing {
+  margin: 0 2px 8px;
+  padding: 6px 8px;
+  background: var(--mdf-warn-soft);
+  border: 1px solid var(--mdf-border);
+  border-radius: 6px;
+}
+
+.assets-missing-head {
+  font-size: 11px;
+  color: var(--mdf-muted);
+  margin-bottom: 4px;
+}
+
+.assets-missing-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.assets-missing-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--mdf-fg);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.asset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.asset-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.asset-item:hover {
+  background: var(--mdf-bg);
+  border-color: var(--mdf-border);
+}
+
+.asset-check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.asset-thumb {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  background: var(--mdf-code-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 5px;
+  cursor: zoom-in;
+}
+
+.asset-thumb.is-missing {
+  border-style: dashed;
+}
+
+.asset-main {
+  flex: 1 1 60px;
+  min-width: 0;
+}
+
+.asset-name {
+  display: block;
+  width: 100%;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mdf-fg);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.asset-name:hover {
+  color: var(--mdf-accent);
+}
+
+.asset-meta,
+.asset-dir {
+  font-size: 11px;
+  color: var(--mdf-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.asset-foot {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 54px;
+}
+
+.asset-refs {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--mdf-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.asset-refs.is-none {
+  color: var(--mdf-faint);
+}
+
+.asset-action {
+  flex: none;
+  padding: 1px 7px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--mdf-muted);
+  background: var(--mdf-bg);
+  border: 1px solid var(--mdf-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.asset-action:hover {
+  color: var(--mdf-accent);
+  border-color: var(--mdf-accent);
 }

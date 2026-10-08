@@ -26,6 +26,10 @@ ul, ol { padding-left: 1.6em; }
 li + li { margin-top: .25em; }
 input[type='checkbox'] { margin-right: .4em; vertical-align: -.12em; }
 hr { height: 1px; margin: 1.5em 0; border: 0; }
+/* 静态站点的页首导航：与正文同一基调，只用透明度拉开层次 */
+.mdf-site-nav { max-width: 860px; margin: 0 auto; padding: 18px 40px 0; font-size: 14px; }
+.mdf-site-nav a { color: inherit; opacity: .65; text-decoration: none; }
+.mdf-site-nav a:hover { opacity: 1; text-decoration: underline; }
 .mdf-toc { margin: 0 0 2em; font-size: 15px; }
 .mdf-toc-title { margin-bottom: .4em; font-size: 13px; letter-spacing: .08em; }
 .mdf-toc-list { padding-left: 1.2em; }

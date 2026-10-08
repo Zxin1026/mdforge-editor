@@ -92,3 +92,8 @@ export function assetUrl(docPath: string, rawSrc: string): string | null {
   if (!local) return null
   return `${ASSET_PREFIX}${encodeURIComponent(local)}`
 }
+
+/** 绝对路径的预览地址：图片资源管理器拿到的路径不经过文档解析 */
+export function assetUrlForPath(absolute: string): string {
+  return `${ASSET_PREFIX}${encodeURIComponent(absolute.replace(/\\/g, '/'))}`
+}

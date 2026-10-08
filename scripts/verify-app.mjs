@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import {
   copyFileSync,
   existsSync,
@@ -25,8 +26,8 @@ const PNG = Buffer.from(
   'base64'
 )
 
-/** 造一张指定尺寸的纯色 PNG，用于验证预览尺寸与放大 */
-function makePng(width, height) {
+/** 造一张指定尺寸的 PNG；noise=true 时填伪随机像素，让无损压缩压不下去（测压缩用） */
+function makePng(width, height, noise = false) {
   const chunk = (type, data) => {
     const length = Buffer.alloc(4)
     length.writeUInt32BE(data.length)
@@ -41,10 +42,15 @@ function makePng(width, height) {
   ihdr[8] = 8
   ihdr[9] = 2
   const rows = []
+  const noiseBytes = noise ? randomBytes(width * height * 3) : Buffer.alloc(0)
   for (let y = 0; y < height; y++) {
     rows.push(Buffer.from([0]))
     const line = Buffer.alloc(width * 3)
-    line.fill(0x66)
+    if (noise) {
+      noiseBytes.copy(line, 0, y * width * 3, (y + 1) * width * 3)
+    } else {
+      line.fill(0x66)
+    }
     rows.push(line)
   }
   return Buffer.concat([
@@ -2025,6 +2031,355 @@ check(
 )
 check('最近打开不再报无权限', !recentStatus.includes('拒绝访问'), recentStatus)
 await app14.close()
+
+/* ============ P1 四项：分屏与写作模式 / 图片资源管理器 / front matter 表单 / 发布导出 ============ */
+const p1Dir = mkdtempSync(path.join(tmpdir(), 'mdforge-p1-'))
+mkdirSync(path.join(p1Dir, 'assets'), { recursive: true })
+mkdirSync(path.join(p1Dir, 'notes'), { recursive: true })
+writeFileSync(path.join(p1Dir, 'assets', 'shot.png'), makePng(400, 300, true))
+writeFileSync(path.join(p1Dir, 'assets', 'unused.png'), makePng(20, 10))
+writeFileSync(
+  path.join(p1Dir, 'index.md'),
+  [
+    '---',
+    'title: 手记首页',
+    'author: 张三',
+    'tags: [笔记]',
+    'custom: keep-me',
+    '---',
+    '',
+    '# 手记',
+    '',
+    '正文第一段，用来观察专注模式。',
+    '',
+    '另一段，引用 [子页](notes/child.md)。',
+    '',
+    '![截图](assets/shot.png)',
+    ''
+  ].join('\n'),
+  'utf8'
+)
+writeFileSync(
+  path.join(p1Dir, 'notes', 'child.md'),
+  '# 子页\n\n[回首页](../index.md)\n\n![截图](../assets/shot.png)\n',
+  'utf8'
+)
+const p1Out = path.join(p1Dir, '网站')
+const p1Epub = path.join(p1Dir, 'book.epub')
+
+resetAppData()
+const app15 = await _electron.launch({
+  executablePath: require('electron'),
+  args: [root, path.join(p1Dir, 'index.md')],
+  cwd: root
+})
+const win15 = await app15.firstWindow()
+win15.on('dialog', (d) => {
+  nativeDialogs += 1
+  d.accept().catch(() => {})
+})
+win15.on('pageerror', (e) => pageErrors.push(e.message))
+win15.on('console', (m) => {
+  if (m.type() === 'error') consoleErrors.push(m.text())
+})
+await win15.waitForSelector('.cm-content')
+await win15.waitForTimeout(600)
+
+const activeEditor15 = () =>
+  win15.evaluate(() => {
+    const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+    if (!shown) return null
+    const content = shown.querySelector('.cm-content')
+    return {
+      text: content?.innerText ?? '',
+      editable: content?.getAttribute('contenteditable') ?? 'missing'
+    }
+  })
+const closeMenu15 = async () => {
+  await win15.keyboard.press('Escape')
+  await win15.waitForTimeout(150)
+}
+const markOf15 = (label) =>
+  win15.evaluate((name) => {
+    const item = [...document.querySelectorAll('.mdf-menu-item')].find((el) => el.dataset.menuLabel === name)
+    return item ? item.querySelector('.mdf-menu-mark')?.textContent ?? '' : 'missing'
+  }, label)
+const waitForFile = (read, timeoutMs = 20000) => until(read, (value) => value === true, timeoutMs)
+
+/* 视图菜单：分屏预览（左源码 · 右渲染） */
+await win15.click('.mdf-menubar-button[data-menu="view"]')
+await win15.waitForSelector('.mdf-menu--bar')
+const viewLabels15 = await menuLabels(win15)
+check(
+  '视图菜单含分屏/阅读/打字机/专注',
+  ['分屏预览', '阅读模式', '打字机模式', '专注模式'].every((label) => viewLabels15.includes(label)),
+  JSON.stringify(viewLabels15)
+)
+check('打字机与专注默认未勾选', (await markOf15('打字机模式')) === '' && (await markOf15('专注模式')) === '', '')
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="分屏预览"]').click()
+await win15.waitForTimeout(800)
+const splitState = await win15.evaluate(() => {
+  const host = document.querySelector('.editor-host')
+  const pane = document.querySelector('.split-preview')
+  const frame = pane?.querySelector('iframe')
+  const src = frame?.getAttribute('srcdoc') ?? ''
+  const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+  return {
+    isSplit: host?.classList.contains('is-split') === true,
+    paneVisible: pane !== null && pane.hidden === false,
+    rendered: src.includes('正文第一段') && src.includes('<h1'),
+    sourceMode: (shown?.querySelector('.cm-content')?.innerText ?? '').includes('# 手记')
+  }
+})
+check('分屏：右栏出现渲染结果', splitState.paneVisible && splitState.rendered, JSON.stringify(splitState))
+check('分屏：左栏自动切到源码视图', splitState.isSplit && splitState.sourceMode, JSON.stringify(splitState))
+await closeMenu15()
+await win15.screenshot({ path: path.join(root, 'verify', 'p1-split.png') })
+
+/* 阅读模式：只读且退出分屏 */
+await win15.click('.mdf-menubar-button[data-menu="view"]')
+await win15.waitForSelector('.mdf-menu--bar')
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="阅读模式"]').click()
+await win15.waitForTimeout(500)
+const readState = await activeEditor15()
+const splitGone = await win15.evaluate(() => document.querySelector('.split-preview')?.hidden === true)
+check('阅读模式：编辑器只读', readState !== null && readState.editable === 'false', JSON.stringify(readState))
+check('切到阅读时退出分屏', splitGone)
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="阅读模式"]').click()
+await win15.waitForTimeout(400)
+check('再点阅读模式回到可编辑', (await activeEditor15())?.editable !== 'false')
+await closeMenu15()
+
+/* 打字机与专注：勾选状态、类名与段落淡化 */
+await win15.click('.mdf-menubar-button[data-menu="view"]')
+await win15.waitForSelector('.mdf-menu--bar')
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="打字机模式"]').click()
+await win15.waitForTimeout(500)
+const typewriterPadding = await win15.evaluate(() => {
+  const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+  const content = shown?.querySelector('.cm-content')
+  return content ? Number.parseFloat(getComputedStyle(content).paddingTop) : 0
+})
+check(
+  '打字机模式：勾选与半屏留白生效',
+  (await markOf15('打字机模式')) === '✓' && typewriterPadding > 200,
+  `padding=${typewriterPadding}`
+)
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="专注模式"]').click()
+await win15.waitForTimeout(500)
+check('专注模式：勾选生效', (await markOf15('专注模式')) === '✓')
+await closeMenu15()
+
+await win15.locator('.cm-line').nth(5).click()
+await win15.waitForTimeout(500)
+const centering = await win15.evaluate(() => {
+  const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+  const scroller = shown?.querySelector('.cm-scroller')
+  const line = shown?.querySelectorAll('.cm-line')[5]
+  if (!scroller || !line) return null
+  const s = scroller.getBoundingClientRect()
+  const l = line.getBoundingClientRect()
+  return Math.abs(l.top + l.height / 2 - (s.top + s.height / 2))
+})
+check('打字机模式：光标行拨到视口中线附近', centering !== null && centering < 140, String(centering))
+const focusDim = await win15.evaluate(() => {
+  const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+  return {
+    dim: shown?.querySelectorAll('.cm-line.mdf-focus-dim').length ?? 0,
+    total: shown?.querySelectorAll('.cm-line').length ?? 0
+  }
+})
+check('专注模式：非当前段落淡化', focusDim.dim > 0 && focusDim.dim < focusDim.total, JSON.stringify(focusDim))
+await win15.screenshot({ path: path.join(root, 'verify', 'p1-focus.png') })
+
+await win15.click('.mdf-menubar-button[data-menu="view"]')
+await win15.waitForSelector('.mdf-menu--bar')
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="打字机模式"]').click()
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="专注模式"]').click()
+await win15.waitForTimeout(400)
+const typewriterOff = await win15.evaluate(() => {
+  const shown = [...document.querySelectorAll('#editor-host .editor-mount')].find((el) => el.style.display !== 'none')
+  const content = shown?.querySelector('.cm-content')
+  return content ? Number.parseFloat(getComputedStyle(content).paddingTop) : 0
+})
+check(
+  '再点一次关闭打字机与专注',
+  (await markOf15('打字机模式')) === '' && (await markOf15('专注模式')) === '' && typewriterOff < 100,
+  `padding=${typewriterOff}`
+)
+await closeMenu15()
+
+/* front matter 表单：预填、原始 YAML 双模式、写回文档 */
+await win15.locator('[data-action="fm-edit"]').click()
+await win15.waitForSelector('.mdf-form-dialog')
+check(
+  'front matter 表单预填字段',
+  (await win15.inputValue('.mdf-form-dialog input[data-field="title"]')) === '手记首页' &&
+    (await win15.inputValue('.mdf-form-dialog input[data-field="author"]')) === '张三' &&
+    (await win15.inputValue('.mdf-form-dialog input[data-field="tags"]')) === '笔记'
+)
+await win15.fill('.mdf-form-dialog input[data-field="title"]', '新手记标题')
+await win15.fill('.mdf-form-dialog input[data-field="tags"]', '小说, 连载')
+await win15.locator('.mdf-dialog-button[data-action="fm-toggle-mode"]').click()
+await win15.waitForTimeout(250)
+const rawYaml = await win15.inputValue('.mdf-form-dialog textarea')
+check(
+  '原始 YAML 保留未知字段与改动',
+  rawYaml.includes('custom: keep-me') && rawYaml.includes('title: 新手记标题') && rawYaml.includes('tags: [小说, 连载]'),
+  rawYaml.replace(/\n/g, '⏎ ').slice(0, 100)
+)
+await win15.screenshot({ path: path.join(root, 'verify', 'p1-frontmatter.png') })
+await win15.locator('.mdf-dialog-button[data-action="fm-toggle-mode"]').click()
+await win15.waitForTimeout(250)
+await win15.locator('.mdf-dialog-button[data-action="fm-save"]').click()
+await win15.waitForTimeout(500)
+const fmText = (await activeEditor15())?.text ?? ''
+check(
+  '表单写回 front matter',
+  fmText.includes('title: 新手记标题') && fmText.includes('custom: keep-me') && fmText.includes('tags: [小说, 连载]'),
+  fmText.replace(/\n/g, '⏎ ').slice(0, 120)
+)
+await saveDoc(win15)
+await win15.waitForTimeout(700)
+check('front matter 改动落盘', (readSafe(path.join(p1Dir, 'index.md')) ?? '').includes('title: 新手记标题'))
+
+/* 打开文件夹 → 图片资源管理器：列表、尺寸、未引用、重命名、压缩 */
+await app15.evaluate(({ dialog }, dir) => {
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dir] })
+}, p1Dir)
+await win15.click('.mdf-menubar-button[data-menu="file"]')
+await win15.waitForSelector('.mdf-menu--bar')
+await win15.locator('.mdf-menu-item[data-menu-label="打开文件夹…"]').click()
+await win15.waitForTimeout(600)
+await win15.click('.mdf-menubar-button[data-menu="view"]')
+await win15.waitForSelector('.mdf-menu--bar')
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="图片资源管理器"]').click()
+await win15.waitForSelector('.asset-item', { timeout: 9000 })
+const assetRows = await win15.$$eval('.asset-item', (els) =>
+  els.map((el) => ({
+    name: el.dataset.assetName ?? '',
+    meta: el.querySelector('.asset-meta')?.textContent ?? '',
+    refs: el.querySelector('.asset-refs')?.textContent ?? ''
+  }))
+)
+check(
+  '图片页列出资源与尺寸',
+  assetRows.length === 2 &&
+    assetRows.some((row) => row.name === 'shot.png' && row.meta.includes('400×300')) &&
+    assetRows.some((row) => row.name === 'unused.png'),
+  JSON.stringify(assetRows)
+)
+check('未引用图片有标记', assetRows.some((row) => row.name === 'unused.png' && row.refs === '未引用'), '')
+await win15.screenshot({ path: path.join(root, 'verify', 'p1-assets.png') })
+
+await win15.locator('.asset-item[data-asset-name="unused.png"] .asset-check').check()
+await win15.locator('[data-action="assets-rename"]').click()
+await win15.waitForSelector('.mdf-form-dialog')
+await win15.fill('.mdf-form-dialog input[data-field="prefix"]', 'pic')
+await win15.locator('.mdf-dialog-button[data-action="form-confirm"]').click()
+await waitForFile(() => existsSync(path.join(p1Dir, 'assets', 'pic-1.png')), 12000)
+check(
+  '批量重命名写盘',
+  existsSync(path.join(p1Dir, 'assets', 'pic-1.png')) && !existsSync(path.join(p1Dir, 'assets', 'unused.png')),
+  ''
+)
+
+await win15.locator('.asset-item[data-asset-name="shot.png"] .asset-check').check()
+await win15.locator('[data-action="assets-compress"]').click()
+await win15.waitForSelector('.mdf-form-dialog')
+await win15.selectOption('.mdf-form-dialog select[data-field="format"]', 'webp')
+await win15.locator('.mdf-dialog-button[data-action="form-confirm"]').click()
+await waitForFile(() => existsSync(path.join(p1Dir, 'assets', 'shot.webp')), 20000)
+const compressStatus = await win15.textContent('#status')
+check(
+  '压缩为 WebP 并替换引用',
+  existsSync(path.join(p1Dir, 'assets', 'shot.webp')) &&
+    !existsSync(path.join(p1Dir, 'assets', 'shot.png')) &&
+    (readSafe(path.join(p1Dir, 'index.md')) ?? '').includes('assets/shot.webp') &&
+    (readSafe(path.join(p1Dir, 'notes', 'child.md')) ?? '').includes('../assets/shot.webp'),
+  compressStatus
+)
+check('状态栏报告压缩结果', compressStatus.includes('已压缩'), compressStatus)
+
+/* 导出静态站点：输出目录对话框桩 → 页面、导航、搜索索引、图片 */
+await app15.evaluate(({ dialog }, outDir) => {
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [outDir] })
+}, p1Out)
+await win15.click('.mdf-menubar-button[data-menu="file"]')
+await win15.waitForSelector('.mdf-menu--bar')
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="导出"]').click()
+await win15.waitForSelector('.mdf-menu--sub')
+const exportLabels15 = await win15.$$eval('.mdf-menu--sub .mdf-menu-item', (els) => els.map((el) => el.dataset.menuLabel))
+check(
+  '导出菜单含批量/站点/EPUB',
+  ['导出文件夹为 HTML…', '导出静态站点…', '导出 EPUB…'].every((label) => exportLabels15.includes(label)),
+  JSON.stringify(exportLabels15)
+)
+await win15.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出静态站点…"]').click()
+await waitForFile(
+  () => existsSync(path.join(p1Out, 'index.html')) && existsSync(path.join(p1Out, 'search-index.json'))
+)
+const siteIndex = readSafe(path.join(p1Out, 'index.html')) ?? ''
+const siteChild = readSafe(path.join(p1Out, 'notes', 'child.html')) ?? ''
+const searchIndex = readSafe(path.join(p1Out, 'search-index.json')) ?? ''
+check('静态站点：导航页含标题与搜索框', siteIndex.includes('新手记标题') && siteIndex.includes('mdf-q'), siteIndex.slice(0, 60))
+check('静态站点：页内返回目录、子页相对链接正确', siteChild.includes('href="../index.html"'), siteChild.slice(0, 80))
+check(
+  '静态站点：搜索索引收录两篇文档',
+  (JSON.parse(searchIndex || '{"docs":[]}')).docs.length === 2,
+  searchIndex.slice(0, 80)
+)
+check(
+  '静态站点：图片复制到各页面旁',
+  existsSync(path.join(p1Out, 'index.assets', 'shot.webp')) &&
+    existsSync(path.join(p1Out, 'notes', 'child.assets', 'shot.webp')),
+  ''
+)
+const siteStatus = await win15.textContent('#status')
+check('状态栏报告导出数量', siteStatus.includes('已导出') && siteStatus.includes('个文件'), siteStatus)
+
+/* 导出 EPUB：单篇/整本选择 → 打包结构 */
+await app15.evaluate(({ dialog }, target) => {
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: target })
+}, p1Epub)
+await win15.click('.mdf-menubar-button[data-menu="file"]')
+await win15.waitForSelector('.mdf-menu--bar')
+await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="导出"]').click()
+await win15.waitForSelector('.mdf-menu--sub')
+await win15.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 EPUB…"]').click()
+await win15.waitForSelector('.mdf-dialog')
+check('EPUB 提供单篇/整本选择', (await dialogText(win15)).includes('整个文件夹成一本书'), await dialogText(win15))
+await answer(win15, '整个文件夹成一本书')
+await waitForFile(() => existsSync(p1Epub))
+const epubBytes = existsSync(p1Epub) ? readFileSync(p1Epub) : Buffer.alloc(0)
+check(
+  'EPUB 打包结构完整（两章、包描述、导航）',
+  epubBytes.includes('application/epub+zip') &&
+    epubBytes.includes('OEBPS/content.opf') &&
+    epubBytes.includes('OEBPS/nav.xhtml') &&
+    epubBytes.includes('OEBPS/chapter-2.xhtml'),
+  `size=${epubBytes.length}`
+)
+/** 从 zip 里解出一条条目的文本（名字在局部头里，先按名字定位局部头再解压） */
+const inflateEntry = (buffer, name) => {
+  const nameBuf = Buffer.from(name, 'ascii')
+  const index = buffer.indexOf(nameBuf)
+  if (index < 30) return ''
+  const localOffset = index - 30
+  const compressed = buffer.readUInt32LE(localOffset + 18)
+  const dataStart = localOffset + 30 + nameBuf.length + buffer.readUInt16LE(localOffset + 28)
+  return zlib.inflateRawSync(buffer.subarray(dataStart, dataStart + compressed)).toString('utf8')
+}
+const chapterText = inflateEntry(epubBytes, 'OEBPS/chapter-1.xhtml')
+check(
+  'EPUB 正文内联图片、结构为 XHTML',
+  chapterText.includes(';base64,') && chapterText.includes('<img') && !chapterText.includes('<img src="assets'),
+  chapterText.slice(0, 80)
+)
+const epubStatus = await win15.textContent('#status')
+check('状态栏报告 EPUB 结果', epubStatus.includes('已导出 EPUB'), epubStatus)
+
+await app15.close()
 
 const windowStateFile = path.join(process.env.APPDATA ?? homedir(), 'mdforge-editor', 'window-state.json')
 check('关闭时记住窗口尺寸位置', existsSync(windowStateFile), windowStateFile)

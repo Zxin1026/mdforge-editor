@@ -1,9 +1,10 @@
+import { createAssetsView, type AssetsView, type AssetsViewDeps } from './side/assets-view'
 import { createFilesView, type FilesViewDeps } from './side/files-view'
 import { createSearchView, type SearchViewDeps } from './side/search-view'
 import { ISSUE_TITLES, KIND_ORDER, type InspectReport, type Issue } from './editor/inspect'
 import { activeIndex, outlineGuides, type OutlineItem } from './editor/outline'
 
-export type SideMode = 'files' | 'outline' | 'search' | 'links' | 'issues'
+export type SideMode = 'files' | 'outline' | 'search' | 'links' | 'assets' | 'issues'
 
 /** 反向链接页的数据：当前文档 + 指向它的其他文档 */
 export interface LinksView {
@@ -38,6 +39,8 @@ export interface SidePanel {
   syncFavorites(): void
   /** 反向链接页 */
   renderLinks(view: LinksView): void
+  /** 图片页：当前文档的缺图引用（定位用） */
+  renderAssetIssues(issues: readonly Issue[]): void
   /** Ctrl+Shift+F：切到搜索页并聚焦输入框 */
   focusSearch(): void
 }
@@ -51,6 +54,7 @@ interface Handlers {
   onOpenFolder(): void
   files: Omit<FilesViewDeps, 'openFile' | 'openFolder'>
   search: SearchViewDeps
+  assets: AssetsViewDeps
   onPickBacklink(path: string, line: number): void
   onRefreshLinks(): void
   onOpenGraph(): void
@@ -69,6 +73,7 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
     openFolder: () => handlers.onOpenFolder()
   })
   const searchView = createSearchView(handlers.search)
+  const assetsView: AssetsView = createAssetsView(handlers.assets)
 
   const tabs = document.createElement('div')
   tabs.className = 'side-tabs'
@@ -80,7 +85,8 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
   const outlineTab = tab('outline', '大纲')
   const searchTab = tab('search', '搜索')
   const linksTab = tab('links', '链接')
-  tabs.append(filesTab, outlineTab, searchTab, linksTab)
+  const assetsTab = tab('assets', '图片')
+  tabs.append(filesTab, outlineTab, searchTab, linksTab, assetsTab)
 
   function tab(which: SideMode, label: string): HTMLButtonElement {
     const button = document.createElement('button')
@@ -103,7 +109,8 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
       ['files', filesTab],
       ['outline', outlineTab],
       ['search', searchTab],
-      ['links', linksTab]
+      ['links', linksTab],
+      ['assets', assetsTab]
     ] as const) {
       tabEl.classList.toggle('is-active', mode === which)
     }
@@ -115,6 +122,7 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
     if (mode === 'files') filesView.mount(body)
     else if (mode === 'search') searchView.mount(body)
     else if (mode === 'links') renderLinksBody()
+    else if (mode === 'assets') assetsView.mount(body)
     else if (mode === 'issues') renderIssuesBody(lastReport, false)
   }
 
@@ -352,6 +360,8 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
     setFolderRoot(dir) {
       filesView.setRoot(dir)
       searchView.onFolderChanged()
+      assetsView.setMissing([])
+      if (mode === 'assets') assetsView.refresh()
     },
     reloadFiles() {
       return filesView.reload()
@@ -362,6 +372,9 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
     renderLinks(view) {
       lastLinks = view
       if (mode === 'links') renderLinksBody()
+    },
+    renderAssetIssues(issues) {
+      assetsView.setMissing(issues)
     },
     focusSearch() {
       if (mode !== 'search') {

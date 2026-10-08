@@ -10,7 +10,13 @@ import remarkRehype from 'remark-rehype'
 import { unified } from 'unified'
 import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from '../../../shared/ipc'
 import { cssFor, pageCss } from './export-css'
-import { rehypeImageWidth, rehypeToc, toPlainText } from './hast'
+import { rehypeImageWidth, rehypeSiteLinks, rehypeToc, toPlainText, type SiteLinkContext } from './hast'
+
+/** 页面构建的附加项：站内链接改写与页首导航（静态站点用） */
+export interface DocHtmlExtra {
+  links?: SiteLinkContext
+  nav?: { href: string; label: string }
+}
 
 /**
  * 导出与校验走 remark 链（CommonMark 合规），与编辑期的 lezer 分工但互不依赖。
@@ -28,9 +34,10 @@ function body() {
     .use(rehypeSanitize, defaultSchema)
 }
 
-function htmlProcessor(options: ExportOptions) {
+function htmlProcessor(options: ExportOptions, extra: DocHtmlExtra = {}) {
   const processor = body().use(rehypeSlug).use(rehypeImageWidth)
   if (options.toc) processor.use(rehypeToc)
+  if (extra.links) processor.use(rehypeSiteLinks, extra.links)
   return processor.use(rehypeHighlight).use(rehypeStringify)
 }
 
@@ -60,9 +67,10 @@ export function deriveTitle(markdownText: string, fallback: string): string {
 
 export async function renderBody(
   markdownText: string,
-  options: ExportOptions = DEFAULT_EXPORT_OPTIONS
+  options: ExportOptions = DEFAULT_EXPORT_OPTIONS,
+  extra: DocHtmlExtra = {}
 ): Promise<string> {
-  return String(await htmlProcessor(options).process(markdownText))
+  return String(await htmlProcessor(options, extra).process(markdownText))
 }
 
 /** 纯文本导出：走同一条渲染链，只取文字，不生成 HTML */
@@ -76,7 +84,22 @@ export async function buildHtml(
   title: string,
   options: ExportOptions = DEFAULT_EXPORT_OPTIONS
 ): Promise<string> {
-  const bodyHtml = await renderBody(markdownText, options)
+  return buildDocHtml(markdownText, title, options)
+}
+
+/** 通用页面构建：静态站点在此基础上加站内链接与"返回目录"导航 */
+export async function buildDocHtml(
+  markdownText: string,
+  title: string,
+  options: ExportOptions = DEFAULT_EXPORT_OPTIONS,
+  extra: DocHtmlExtra = {}
+): Promise<string> {
+  const bodyHtml = await renderBody(markdownText, options, extra)
+  const nav =
+    extra.nav === undefined
+      ? ''
+      : `<nav class="mdf-site-nav"><a href="${escapeHtml(extra.nav.href)}">${escapeHtml(extra.nav.label)}</a></nav>
+`
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -87,7 +110,7 @@ export async function buildHtml(
 ${pageCss(options.paper, options.margin)}</style>
 </head>
 <body>
-<article class="mdf-doc">
+${nav}<article class="mdf-doc">
 ${bodyHtml}
 </article>
 </body>

@@ -2,7 +2,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { syntaxHighlighting } from '@codemirror/language'
 import { search, searchKeymap } from '@codemirror/search'
 import { Compartment, EditorState, Transaction, type Extension } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
+import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import type { FileErrorInfo } from '../../../shared/ipc'
 import { createSlugger } from '../../../shared/slug'
 import { markdownKeymap } from './commands'
@@ -32,6 +32,8 @@ export interface MarkdownEditor {
   cursorPos(): number
   /** 选中一段并滚动到可见：工作区搜索命中的定位口径 */
   selectRange(from: number, to?: number): void
+  /** 批量字面替换正文片段（资源改引用用），进撤销历史，返回实际应用条数 */
+  applyEdits(edits: ReadonlyArray<{ from: number; to: number; insert: string }>): number
   cursorLine(): number
   status(): StatusInfo
   /** 检查结果的内联标记（行底色 + 命中片段波浪线） */
@@ -45,11 +47,91 @@ export interface MarkdownEditor {
   /** 源代码模式：只摘掉行内渲染装饰，正文语法高亮与查找照旧 */
   setSourceMode(on: boolean): void
   sourceMode(): boolean
+  /** 打字机模式：光标行始终落在视口中线附近 */
+  setTypewriter(on: boolean): void
+  typewriter(): boolean
+  /** 专注模式：只突出光标所在段落，其余行淡化 */
+  setFocusMode(on: boolean): void
+  focusMode(): boolean
+  /** 阅读模式：只读，不接受编辑 */
+  setReadOnly(on: boolean): void
+  readOnly(): boolean
   /** 深浅色切换后重建装饰集，让 mermaid 之类的主题相关块重画 */
   refreshDecorations(): void
   dom: HTMLElement
   destroy(): void
 }
+
+/** 段落范围：以空行为界，光标所在的那一整段 */
+function paragraphRange(state: EditorState): { from: number; to: number } {
+  const line = state.doc.lineAt(state.selection.main.head)
+  let first = line.number
+  while (first > 1 && state.doc.line(first - 1).text.trim() !== '') first -= 1
+  let last = line.number
+  while (last < state.doc.lines && state.doc.line(last + 1).text.trim() !== '') last += 1
+  return { from: state.doc.line(first).from, to: state.doc.line(last).to }
+}
+
+const FOCUS_DIM_LINE = Decoration.line({ class: 'mdf-focus-dim' })
+
+function buildFocusDecorations(state: EditorState): DecorationSet {
+  const active = paragraphRange(state)
+  const ranges = []
+  for (let number = 1; number <= state.doc.lines; number += 1) {
+    const line = state.doc.line(number)
+    if (line.from >= active.from && line.to <= active.to) continue
+    ranges.push(FOCUS_DIM_LINE.range(line.from))
+  }
+  return Decoration.set(ranges, true)
+}
+
+/** 专注模式：光标所在段落之外的行淡化 */
+const focusPlugin = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet
+    constructor(view: EditorView) {
+      this.decorations = buildFocusDecorations(view.state)
+    }
+    update(update: ViewUpdate): void {
+      if (update.docChanged || update.selectionSet) this.decorations = buildFocusDecorations(update.state)
+    }
+  },
+  { decorations: (plugin) => plugin.decorations }
+)
+
+/**
+ * 打字机模式：每次移动光标或改字后把光标行拨到视口中线。
+ * 在测量阶段直接改 scrollTop（不派发新事务），避免更新回调里嵌套 dispatch。
+ */
+const typewriterExtension = EditorView.updateListener.of((update) => {
+  if (!(update.docChanged || update.selectionSet)) return
+  const view = update.view
+  if (view.state.field(compositionField, false)?.composing) return
+  const pos = update.state.selection.main.head
+  view.requestMeasure({
+    read: (target) => target.coordsAtPos(pos),
+    write: (coords, target) => {
+      if (!coords) return
+      const scroller = target.scrollDOM
+      const rect = scroller.getBoundingClientRect()
+      const delta = coords.top - (rect.top + rect.height / 2)
+      if (Math.abs(delta) < 1) return
+      scroller.scrollTop += delta
+    }
+  })
+})
+
+/**
+ * 打字机需要上下都留半屏，第一行与最后一行才挪得动。
+ * 走 CM6 主题（框架自己维护主题类名）：直接往 view.dom 加自定义类，
+ * 下一次编辑更新时会被 CodeMirror 重写 className 抹掉。
+ */
+const typewriterTheme = EditorView.theme({
+  '&.cm-editor .cm-content': {
+    paddingTop: '38vh',
+    paddingBottom: '46vh'
+  }
+})
 
 export function createEditor(
   mount: HTMLElement,
@@ -94,7 +176,13 @@ export function createEditor(
 
   const hover = createHover()
   const renderMode = new Compartment()
+  const typewriterComp = new Compartment()
+  const focusComp = new Compartment()
+  const readComp = new Compartment()
   let source = false
+  let typewriterOn = false
+  let focusOn = false
+  let readOn = false
 
   const extensions: Extension[] = [
     history({ newGroupDelay: 500 }),
@@ -105,6 +193,9 @@ export function createEditor(
     compositionEvents,
     markdownLanguageExtension,
     renderMode.of(markdownDecorations),
+    typewriterComp.of([]),
+    focusComp.of([]),
+    readComp.of([]),
     issueMarkField,
     // 顺序要紧：markdown 限定样式先覆盖标题与链接的下划线，代码块交给主题高亮
     syntaxHighlighting(markdownHighlight),
@@ -165,6 +256,21 @@ export function createEditor(
       view.dispatch({ selection: { anchor, head }, scrollIntoView: true, userEvent: 'select' })
       view.focus()
     },
+    applyEdits: (edits) => {
+      if (edits.length === 0) return 0
+      // CodeMirror 要求同一批 changes 互不重叠；按起点排序后丢掉被包住的
+      const sorted = [...edits].sort((a, b) => a.from - b.from || b.to - a.to)
+      const clean: Array<{ from: number; to: number; insert: string }> = []
+      let last = -1
+      for (const edit of sorted) {
+        if (edit.from < last) continue
+        clean.push(edit)
+        last = edit.to
+      }
+      if (clean.length === 0) return 0
+      view.dispatch({ changes: clean, userEvent: 'input' })
+      return clean.length
+    },
     cursorLine: () => view.state.doc.lineAt(view.state.selection.main.head).number,
     status: () => computeStatus(view.state),
     setIssues: (issues) => {
@@ -184,6 +290,45 @@ export function createEditor(
       view.focus()
     },
     sourceMode: () => source,
+    setTypewriter: (on) => {
+      if (on === typewriterOn) return
+      typewriterOn = on
+      view.dispatch({
+        effects: typewriterComp.reconfigure(on ? [typewriterExtension, typewriterTheme] : []),
+        scrollIntoView: false
+      })
+      if (on) {
+        // 打开时立刻把当前行拨到中线，不等下一次移动
+        const pos = view.state.selection.main.head
+        view.requestMeasure({
+          read: (target) => target.coordsAtPos(pos),
+          write: (coords, target) => {
+            if (!coords) return
+            const scroller = target.scrollDOM
+            const rect = scroller.getBoundingClientRect()
+            scroller.scrollTop += coords.top - (rect.top + rect.height / 2)
+          }
+        })
+      }
+    },
+    typewriter: () => typewriterOn,
+    setFocusMode: (on) => {
+      if (on === focusOn) return
+      focusOn = on
+      view.dispatch({ effects: focusComp.reconfigure(on ? focusPlugin : []) })
+    },
+    focusMode: () => focusOn,
+    setReadOnly: (on) => {
+      if (on === readOn) return
+      readOn = on
+      view.dispatch({
+        effects: readComp.reconfigure(
+          on ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []
+        ),
+        scrollIntoView: false
+      })
+    },
+    readOnly: () => readOn,
     refreshDecorations: () => {
       view.dispatch({ effects: themeChanged.of(null) })
     },

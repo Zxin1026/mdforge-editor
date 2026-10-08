@@ -1,6 +1,7 @@
 import { deleteLine, moveLineDown, moveLineUp, redo, redoDepth, selectAll, undo, undoDepth } from '@codemirror/commands'
 import { findNext, findPrevious, openSearchPanel, replaceAll } from '@codemirror/search'
 import type { EditorView } from '@codemirror/view'
+import { openFrontMatterEditor } from '../frontmatter-dialog'
 import { boldCmd, headingCmd, inlineCodeCmd, italicCmd, listCmd, quoteCmd, strikeCmd, tableCmd } from './commands'
 import { htmlToMarkdown } from './rich-paste'
 
@@ -40,6 +41,7 @@ export type EditorAction =
   | 'findNext'
   | 'findPrevious'
   | 'replaceAll'
+  | 'frontMatter'
 
 export interface EditorFacts {
   canUndo: boolean
@@ -140,7 +142,11 @@ const runners: Record<EditorAction, (view: EditorView) => boolean> = {
   },
   findNext: (view) => findNext(view),
   findPrevious: (view) => findPrevious(view),
-  replaceAll: (view) => replaceAll(view)
+  replaceAll: (view) => replaceAll(view),
+  frontMatter: (view) => {
+    void openFrontMatterEditor(view)
+    return true
+  }
 }
 
 export function runEditorAction(view: EditorView, action: EditorAction): boolean {

@@ -24,6 +24,20 @@ let seq = 0
 /** 只有最上面那个框响应 Esc：确认后叠在下面的框不应一起被关掉 */
 const stack: HTMLElement[] = []
 
+/** 表单类对话框与确认框共用一个栈：Esc 与全局快捷键都只认栈顶 */
+export function dialogStackPush(element: HTMLElement): void {
+  stack.push(element)
+}
+
+export function dialogStackRemove(element: HTMLElement): void {
+  const index = stack.indexOf(element)
+  if (index >= 0) stack.splice(index, 1)
+}
+
+export function dialogStackTop(): HTMLElement | null {
+  return stack[stack.length - 1] ?? null
+}
+
 export function askDialog<T>(spec: DialogSpec<T>): Promise<T> {
   return new Promise<T>((resolve) => {
     seq += 1
@@ -78,8 +92,7 @@ export function askDialog<T>(spec: DialogSpec<T>): Promise<T> {
       if (settled) return
       settled = true
       document.removeEventListener('keydown', onKey, true)
-      const index = stack.indexOf(backdrop)
-      if (index >= 0) stack.splice(index, 1)
+      dialogStackRemove(backdrop)
       backdrop.remove()
       resolve(value)
     }
@@ -98,7 +111,7 @@ export function askDialog<T>(spec: DialogSpec<T>): Promise<T> {
 
     function onKey(event: KeyboardEvent): void {
       if (event.key !== 'Escape') return
-      if (stack[stack.length - 1] !== backdrop) return
+      if (dialogStackTop() !== backdrop) return
       event.preventDefault()
       event.stopPropagation()
       finish(spec.cancelValue)
@@ -118,7 +131,7 @@ export function askDialog<T>(spec: DialogSpec<T>): Promise<T> {
 
     backdrop.appendChild(panel)
     document.body.appendChild(backdrop)
-    stack.push(backdrop)
+    dialogStackPush(backdrop)
     document.addEventListener('keydown', onKey, true)
     panel.focus()
   })

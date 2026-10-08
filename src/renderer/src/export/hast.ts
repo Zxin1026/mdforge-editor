@@ -1,4 +1,5 @@
 import { widthFromTitle } from '../editor/assets'
+import { dirOfPath, relativeBetween } from '../paths'
 
 /**
  * 导出链上的 hast 处理。hast 的类型包在依赖内部，这里用自己的宽松形状描述，
@@ -117,6 +118,58 @@ export function rehypeToc() {
 export function rehypeImageWidth() {
   return (input: unknown): void => {
     walk(input as HastRoot)
+  }
+}
+
+/** 站内链接改写所需的上下文：当前页、源文档目录与整站的路径对照表 */
+export interface SiteLinkContext {
+  /** 当前页面在站点里的相对路径（posix），用于算相对链接 */
+  pagePath: string
+  /** 源文档所在目录的绝对路径 */
+  docDir: string
+  /** 源文档绝对路径（小写） → 站点内 html 相对路径 */
+  map: Map<string, string>
+  /** 相对引用 → 绝对路径（渲染进程侧的 resolvePath） */
+  resolve(baseDir: string, relative: string): string
+}
+
+/** `b.md#x` → 站点内的 `b.html#x`；指向导出范围之外或外部地址的返回 null 保持原样 */
+export function siteHref(href: string, context: SiteLinkContext): string | null {
+  if (href === '' || href.startsWith('#')) return null
+  if (href.startsWith('//') || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) return null
+  const hashIndex = href.indexOf('#')
+  const filePart = hashIndex >= 0 ? href.slice(0, hashIndex) : href
+  const hash = hashIndex >= 0 ? href.slice(hashIndex) : ''
+  if (filePart === '') return null
+  let decoded = filePart
+  try {
+    decoded = decodeURIComponent(filePart)
+  } catch {
+    /* 编码异常就按原样解析 */
+  }
+  const target = context.map.get(context.resolve(context.docDir, decoded).toLowerCase())
+  if (target === undefined) return null
+  const relative = relativeBetween(dirOfPath(context.pagePath), target)
+  if (relative === null) return null
+  return encodeURI(relative) + hash
+}
+
+/** 把正文里的文档间链接改写为导出页面的地址 */
+export function rehypeSiteLinks(context: SiteLinkContext) {
+  return (input: unknown): void => {
+    rewriteTree(input as HastRoot, context)
+  }
+}
+
+function rewriteTree(tree: HastRoot, context: SiteLinkContext): void {
+  for (const node of tree.children) {
+    if (node.type !== 'element') continue
+    if (node.tagName === 'a' && node.properties) {
+      const href = stringOf(node.properties.href)
+      const next = siteHref(href, context)
+      if (next !== null) node.properties.href = next
+    }
+    if (node.children) rewriteTree({ type: 'root', children: node.children }, context)
   }
 }
 

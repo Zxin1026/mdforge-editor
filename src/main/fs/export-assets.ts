@@ -89,6 +89,17 @@ export function collectImageRefs(html: string): string[] {
   return seen
 }
 
+/** 输出目录内的相对路径：只留正常片段，把 .. 与盘符挡在外面 */
+export function safeRelative(relative: string): string | null {
+  const parts = relative
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((part) => part !== '' && part !== '.')
+  if (parts.length === 0) return null
+  if (parts.some((part) => part === '..' || part.includes(':') || part.includes('\0'))) return null
+  return parts.join('/')
+}
+
 async function statFile(absolute: string): Promise<{ size: number } | null> {
   try {
     const stat = await fs.stat(absolute)
