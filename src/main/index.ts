@@ -8,12 +8,14 @@ import { registerWindowHandlers } from './window-controls'
 import { initUpdater, registerUpdateHandlers } from './updater'
 import { initDraftStore } from './fs/draft-store'
 import { collectFromArgv } from './fs/startup'
+import { initStyleStore } from './fs/style-store'
 import { stopAllWatchers } from './fs/watch'
 import { fitToDisplays, readWindowState, saveWindowState, type WindowState } from './window-state'
 
 collectFromArgv(process.argv)
 registerAssetScheme()
 initDraftStore(path.join(app.getPath('userData'), 'drafts'))
+initStyleStore(path.join(app.getPath('userData'), 'export-styles'))
 
 const RENDERER_ENTRY = path.join(__dirname, '../renderer/index.html')
 const STATE_DIR = app.getPath('userData')

@@ -132,8 +132,34 @@ export type FileResult<T> = { ok: true; value: T } | { ok: false; error: FileErr
 /** 图片资源处理：复制到导出文件旁、base64 内联，或原样保留相对路径 */
 export type AssetExportMode = 'copy' | 'inline' | 'keep'
 
-/** 导出 HTML 的排版主题；dark 与应用深色界面同一套配色，mdmdt 移植自同名 Typora 主题 */
-export type ExportTheme = 'default' | 'serif' | 'plain' | 'dark' | 'mdmdt'
+/** 内置导出主题；dark 与应用深色界面同一套配色，mdmdt 移植自同名 Typora 主题 */
+export const BUILTIN_EXPORT_THEMES = ['default', 'serif', 'plain', 'dark', 'mdmdt'] as const
+
+export type BuiltinExportTheme = (typeof BUILTIN_EXPORT_THEMES)[number]
+
+/** 自定义主题与页面模板的引用前缀：custom:<id> 指向 userData 里的条目 */
+export const CUSTOM_REF = 'custom:'
+
+export type ExportTheme = BuiltinExportTheme | `custom:${string}`
+
+/** 代码高亮主题：auto 沿用排版主题自带的配色，其余来自内置的 highlight.js 主题集 */
+export const HIGHLIGHT_THEMES = [
+  'github',
+  'atom-one-light',
+  'solarized-light',
+  'github-dark',
+  'atom-one-dark',
+  'monokai',
+  'dracula',
+  'nord',
+  'solarized-dark',
+  'vs2015'
+] as const
+
+export type HighlightTheme = 'auto' | (typeof HIGHLIGHT_THEMES)[number]
+
+/** 页面模板：内置标准页，或 custom:<id> 指向自定义模板 */
+export type PageTemplate = 'builtin' | `custom:${string}`
 
 export type PaperSize = 'A4' | 'Letter' | 'Legal' | 'A5'
 
@@ -142,6 +168,8 @@ export type PageMargin = 'narrow' | 'standard' | 'wide'
 export interface ExportOptions {
   assets: AssetExportMode
   theme: ExportTheme
+  highlight: HighlightTheme
+  template: PageTemplate
   toc: boolean
   paper: PaperSize
   margin: PageMargin
@@ -150,6 +178,8 @@ export interface ExportOptions {
 export const DEFAULT_EXPORT_OPTIONS: ExportOptions = {
   assets: 'copy',
   theme: 'default',
+  highlight: 'auto',
+  template: 'builtin',
   toc: false,
   paper: 'A4',
   margin: 'standard'
@@ -161,11 +191,35 @@ export const MARGIN_MM: Record<PageMargin, number> = { narrow: 12, standard: 20,
 export const PAPER_SIZES: PaperSize[] = ['A4', 'Letter', 'Legal', 'A5']
 
 const ASSET_MODES: AssetExportMode[] = ['copy', 'inline', 'keep']
-const EXPORT_THEMES: ExportTheme[] = ['default', 'serif', 'plain', 'dark', 'mdmdt']
 const PAGE_MARGINS: PageMargin[] = ['narrow', 'standard', 'wide']
+const HIGHLIGHT_CHOICES: HighlightTheme[] = ['auto', ...HIGHLIGHT_THEMES]
 
-function pick<T extends string>(list: T[], value: unknown, fallback: T): T {
-  return list.includes(value as T) ? (value as T) : fallback
+/** custom:<id> 的 id 会进会话、文件名与 DOM dataset，只收小写字母数字与连字符 */
+const CUSTOM_ID = /^custom:[a-z0-9][a-z0-9-]{0,39}$/
+
+export function customRefOf(id: string): `custom:${string}` {
+  return `${CUSTOM_REF}${id}`
+}
+
+/** 引用里取出自定义 id；内置引用（default、builtin 等）返回 null */
+export function customIdOf(ref: string): string | null {
+  return ref.startsWith(CUSTOM_REF) && CUSTOM_ID.test(ref) ? ref.slice(CUSTOM_REF.length) : null
+}
+
+function pick<T extends string>(list: readonly T[], value: unknown, fallback: T): T {
+  return (list as readonly string[]).includes(value as string) ? (value as T) : fallback
+}
+
+function pickTheme(value: unknown): ExportTheme {
+  const builtin = pick(BUILTIN_EXPORT_THEMES, value, DEFAULT_EXPORT_OPTIONS.theme)
+  if (builtin === value) return builtin
+  if (typeof value === 'string' && CUSTOM_ID.test(value)) return value as ExportTheme
+  return DEFAULT_EXPORT_OPTIONS.theme
+}
+
+function pickTemplate(value: unknown): PageTemplate {
+  if (typeof value === 'string' && CUSTOM_ID.test(value)) return value as PageTemplate
+  return DEFAULT_EXPORT_OPTIONS.template
 }
 
 /** 选项来自会话文件或渲染进程，逐字段回落默认值 */
@@ -173,11 +227,68 @@ export function normalizeExportOptions(raw: unknown): ExportOptions {
   const input = (raw ?? {}) as Partial<ExportOptions>
   return {
     assets: pick(ASSET_MODES, input.assets, DEFAULT_EXPORT_OPTIONS.assets),
-    theme: pick(EXPORT_THEMES, input.theme, DEFAULT_EXPORT_OPTIONS.theme),
+    theme: pickTheme(input.theme),
+    highlight: pick(HIGHLIGHT_CHOICES, input.highlight, DEFAULT_EXPORT_OPTIONS.highlight),
+    template: pickTemplate(input.template),
     toc: input.toc === true,
     paper: pick(PAPER_SIZES, input.paper, DEFAULT_EXPORT_OPTIONS.paper),
     margin: pick(PAGE_MARGINS, input.margin, DEFAULT_EXPORT_OPTIONS.margin)
   }
+}
+
+/** 自定义样式资产：主题的 CSS 与页面模板的 HTML，都存在 userData 下的 json 文件里 */
+export type CustomStyleKind = 'theme' | 'template'
+
+export interface CustomTheme {
+  id: string
+  name: string
+  css: string
+}
+
+export interface CustomTemplate {
+  id: string
+  name: string
+  html: string
+}
+
+export interface CustomStyleLibrary {
+  themes: CustomTheme[]
+  templates: CustomTemplate[]
+}
+
+/** 保存主题/模板：id 为 null 时新建 */
+export interface CustomStyleInput {
+  kind: CustomStyleKind
+  id: string | null
+  name: string
+  /** theme 存 CSS，template 存 HTML */
+  content: string
+}
+
+export interface CustomStyleSaved {
+  id: string
+  library: CustomStyleLibrary
+}
+
+export interface CustomStyleImport {
+  id: string
+  name: string
+  kind: CustomStyleKind
+  library: CustomStyleLibrary
+}
+
+/** 名称与内容的体量上限：导入的外部文件同样受这两条约束 */
+export const STYLE_NAME_MAX = 40
+export const STYLE_CONTENT_MAX = 512 * 1024
+
+/** 页面模板必填的占位符：正文要有个落点，主进程导入时也按它校验 */
+export const TEMPLATE_CONTENT_PLACEHOLDER = '{{content}}'
+
+/** 模板占位符校验：主进程导入与渲染进程保存共用同一条规则 */
+export function templatePlaceholderProblem(html: string): string | null {
+  return html.includes(TEMPLATE_CONTENT_PLACEHOLDER)
+    ? null
+    : `模板里要有 ${TEMPLATE_CONTENT_PLACEHOLDER} 占位符，否则正文没地方放`
 }
 
 export interface ExportInput {
@@ -542,6 +653,15 @@ export interface FileApi {
   exportBatch(input: BatchExportInput): Promise<FileResult<BatchExportResult>>
   /** 导出 EPUB：多个章节打包成一本电子书 */
   exportEpub(input: EpubExportInput): Promise<FileResult<EpubExportResult>>
+  /** 自定义导出主题与页面模板：列出 userData 里的全部条目 */
+  styleList(): Promise<CustomStyleLibrary>
+  /** 新建或覆盖保存一条主题/模板 */
+  styleSave(input: CustomStyleInput): Promise<FileResult<CustomStyleSaved>>
+  styleDelete(kind: CustomStyleKind, id: string): Promise<FileResult<CustomStyleLibrary>>
+  /** 从 .json（{name, css|html}）或 .css/.html 文件导入；取消为 null */
+  styleImport(kind: CustomStyleKind): Promise<FileResult<CustomStyleImport | null>>
+  /** 导出为原始 .css/.html 文件，返回写出路径；取消为 null */
+  styleExport(kind: CustomStyleKind, id: string): Promise<FileResult<string | null>>
   /** 文档检查用：批量判断引用路径是否存在，并列出 assets/ 下的实际文件 */
   probeResources(input: ResourceProbeInput): Promise<FileResult<ResourceProbeResult>>
   reveal(path: string): Promise<boolean>
@@ -616,6 +736,11 @@ export const CHANNEL = {
   chooseExportFolder: 'mdforge:export:choose-folder',
   exportBatch: 'mdforge:export:batch',
   exportEpub: 'mdforge:export:epub',
+  styleList: 'mdforge:style:list',
+  styleSave: 'mdforge:style:save',
+  styleDelete: 'mdforge:style:delete',
+  styleImport: 'mdforge:style:import',
+  styleExport: 'mdforge:style:export',
   probeResources: 'mdforge:fs:probe',
   reveal: 'mdforge:reveal',
   openExternal: 'mdforge:open-external',

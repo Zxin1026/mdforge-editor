@@ -9,13 +9,17 @@ import remarkParse from 'remark-parse'
 import remarkRehype from 'remark-rehype'
 import { unified } from 'unified'
 import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from '../../../shared/ipc'
-import { cssFor, pageCss } from './export-css'
+import { pageCss } from './export-css'
 import { rehypeImageWidth, rehypeSiteLinks, rehypeToc, toPlainText, type SiteLinkContext } from './hast'
+import { applyTemplate, BUILTIN_TEMPLATE_HTML } from './page-template'
+import { cssForRef, templateHtmlForRef } from './style-lib'
 
 /** 页面构建的附加项：站内链接改写与页首导航（静态站点用） */
 export interface DocHtmlExtra {
   links?: SiteLinkContext
   nav?: { href: string; label: string }
+  /** 主题/模板编辑器的实时预览：直接携带内容，绕过注册表 */
+  preview?: { themeCss?: string; templateHtml?: string }
 }
 
 /**
@@ -82,9 +86,10 @@ export async function renderText(markdownText: string): Promise<string> {
 export async function buildHtml(
   markdownText: string,
   title: string,
-  options: ExportOptions = DEFAULT_EXPORT_OPTIONS
+  options: ExportOptions = DEFAULT_EXPORT_OPTIONS,
+  extra: DocHtmlExtra = {}
 ): Promise<string> {
-  return buildDocHtml(markdownText, title, options)
+  return buildDocHtml(markdownText, title, options, extra)
 }
 
 /** 通用页面构建：静态站点在此基础上加站内链接与"返回目录"导航 */
@@ -100,20 +105,16 @@ export async function buildDocHtml(
       ? ''
       : `<nav class="mdf-site-nav"><a href="${escapeHtml(extra.nav.href)}">${escapeHtml(extra.nav.label)}</a></nav>
 `
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
-<style>${cssFor(options.theme)}
-${pageCss(options.paper, options.margin)}</style>
-</head>
-<body>
-${nav}<article class="mdf-doc">
+  const css = extra.preview?.themeCss ?? cssForRef(options.theme, options.highlight)
+  const template = extra.preview?.templateHtml ?? templateHtmlForRef(options.template) ?? BUILTIN_TEMPLATE_HTML
+  return applyTemplate(template, {
+    title: escapeHtml(title),
+    lang: 'zh-CN',
+    style: `<style>${css}
+${pageCss(options.paper, options.margin)}</style>`,
+    nav,
+    content: `<article class="mdf-doc">
 ${bodyHtml}
-</article>
-</body>
-</html>
-`
+</article>`
+  })
 }

@@ -1,5 +1,13 @@
-import type { ExportTheme, PageMargin, PaperSize } from '../../../shared/ipc'
-import { MARGIN_MM } from '../../../shared/ipc'
+import {
+  BUILTIN_EXPORT_THEMES,
+  MARGIN_MM,
+  type BuiltinExportTheme,
+  type ExportTheme,
+  type HighlightTheme,
+  type PageMargin,
+  type PaperSize
+} from '../../../shared/ipc'
+import { highlightCss } from './highlight-css'
 
 /** 结构样式：与主题无关，所有导出文档共用 */
 const BASE_CSS = `
@@ -185,6 +193,20 @@ export function pageCss(paper: PaperSize, margin: PageMargin): string {
   return `@page { size: ${PAGE_SIZE[paper]}; margin: ${MARGIN_MM[margin]}mm; }\n`
 }
 
-export function cssFor(theme: ExportTheme): string {
-  return `${BASE_CSS}\n${THEME_CSS[theme] ?? THEME_CSS.default}`
+/** 内置主题的样式块；custom:<id> 引用返回 null。主题编辑器拿它做"复制为自定义"的底稿 */
+export function builtinThemeCss(theme: ExportTheme): string | null {
+  return (BUILTIN_EXPORT_THEMES as readonly string[]).includes(theme) ? THEME_CSS[theme as BuiltinExportTheme] : null
+}
+
+export interface CssExtras {
+  /** custom:<id> 引用命中的自定义 CSS；条目被删时回落默认主题 */
+  custom?: string
+  /** 代码高亮主题；auto 沿用排版主题自带的配色 */
+  highlight?: HighlightTheme
+}
+
+export function cssFor(theme: ExportTheme, extras: CssExtras = {}): string {
+  const themed = builtinThemeCss(theme) ?? extras.custom ?? THEME_CSS.default
+  const highlight = highlightCss(extras.highlight ?? 'auto')
+  return highlight === '' ? `${BASE_CSS}\n${themed}` : `${BASE_CSS}\n${themed}\n${highlight}`
 }

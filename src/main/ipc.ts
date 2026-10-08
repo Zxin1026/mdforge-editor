@@ -9,6 +9,7 @@ import {
   type AssetWriteInput,
   type BatchExportInput,
   type BatchFileInput,
+  type CustomStyleInput,
   type DocDraft,
   type EpubChapterInput,
   type EpubExportInput,
@@ -32,6 +33,8 @@ import { saveAsset } from './fs/asset-store'
 import { listAssets, readAssetBytes, renameAssets, replaceAsset } from './fs/asset-manager'
 import { chooseExportFolder, exportBatch } from './fs/batch-export'
 import { exportEpub } from './fs/epub'
+import { deleteStyle, listStyles, saveStyle } from './fs/style-store'
+import { exportStyle, importStyle } from './fs/style-transfer'
 import { probeResources } from './fs/resource-check'
 import { draftClear, draftList, draftWrite } from './fs/draft-store'
 import { readSession, writeSession } from './fs/session'
@@ -551,6 +554,25 @@ export function registerFileHandlers(getWindow: () => BrowserWindow | null): voi
   ipcMain.handle(CHANNEL.exportEpub, (_event, raw: unknown) =>
     guarded(() => exportEpub(parseEpubExport(raw), getWindow()))
   )
+
+  ipcMain.handle(CHANNEL.styleList, async () => {
+    try {
+      return await listStyles()
+    } catch {
+      return { themes: [], templates: [] }
+    }
+  })
+
+  ipcMain.handle(CHANNEL.styleSave, (_event, raw: unknown) => guarded(() => saveStyle(raw as CustomStyleInput)))
+
+  ipcMain.handle(CHANNEL.styleDelete, (_event, kind: unknown, id: unknown) => guarded(() => deleteStyle(kind, id)))
+
+  ipcMain.handle(CHANNEL.styleImport, (_event, kind: unknown) => guarded(() => importStyle(kind, getWindow())))
+
+  ipcMain.handle(CHANNEL.styleExport, (_event, kind: unknown, id: unknown) =>
+    guarded(() => exportStyle(kind, id, getWindow()))
+  )
+
   ipcMain.handle(CHANNEL.probeResources, (_event, raw: unknown) => guarded(() => probeResources(parseProbeInput(raw))))
 
   ipcMain.handle(CHANNEL.reveal, (_event, target: string) => {

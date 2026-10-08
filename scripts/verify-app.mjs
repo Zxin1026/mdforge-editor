@@ -134,6 +134,8 @@ const clearDrafts = () => rmSync(draftRoot, { recursive: true, force: true })
 const resetAppData = () => {
   clearDrafts()
   rmSync(path.join(userData, 'session.json'), { force: true })
+  /* 自定义导出主题与页面模板也清掉：不然后面的用例会读到上一轮留下的列表 */
+  rmSync(path.join(userData, 'export-styles'), { recursive: true, force: true })
 }
 /* Windows 上 playwright 经 cmd.exe /c 拉起 electron，process().kill() 只杀得掉 cmd 这一层，
    electron 会作为孤儿窗口继续挂着：close() 等不到进程退出，孤儿还会周期性写草稿搅乱后面的用例。
@@ -2379,10 +2381,183 @@ check(
 const epubStatus = await win15.textContent('#status')
 check('状态栏报告 EPUB 结果', epubStatus.includes('已导出 EPUB'), epubStatus)
 
+/* 自定义主题与模板：管理器里新建/导入导出 → 导出 HTML 用上自定义 CSS、高亮与页面模板 */
+const styleRoot15 = path.join(userData, 'export-styles')
+const styleHtmlStar = path.join(p1Dir, '主题导出.html')
+const styleHtmlTpl = path.join(p1Dir, '模板导出.html')
+const styleOutCss = path.join(p1Dir, '夜航星.css')
+const importCssFile = path.join(p1Dir, '导入-样式.css')
+writeFileSync(importCssFile, 'body { color: #abcdef; }\n', 'utf8')
+
+const openOptions15 = async () => {
+  await win15.keyboard.press('Escape')
+  await win15.waitForTimeout(150)
+  await win15.click('.mdf-menubar-button[data-menu="file"]')
+  await win15.waitForSelector('.mdf-menu--bar')
+  await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="导出"]').click()
+  await win15.waitForSelector('.mdf-menu--sub')
+  await win15.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出选项"]').click()
+  await win15.waitForTimeout(250)
+}
+const exportHtml15 = async (target) => {
+  await app15.evaluate(({ dialog }, file) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: file })
+  }, target)
+  await win15.click('.mdf-menubar-button[data-menu="file"]')
+  await win15.waitForSelector('.mdf-menu--bar')
+  await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="导出"]').click()
+  await win15.waitForSelector('.mdf-menu--sub')
+  await win15.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 HTML…"]').click()
+  await until(() => existsSync(target), (ok) => ok === true, 20000)
+  return readSafe(target) ?? ''
+}
+const styleRows15 = () =>
+  win15.$$eval('.mdf-style-row', (els) =>
+    els.map((el) => ({
+      name: el.querySelector('.mdf-style-name')?.textContent ?? '',
+      current: el.querySelector('.mdf-style-current') !== null
+    }))
+  )
+
+await openOptions15()
+const styleOptionLabels = await menuLabels(win15)
+check(
+  '选项页新增主题管理、代码高亮与页面模板',
+  ['管理主题与模板…', '跟随主题', 'GitHub Dark', 'Monokai', '内置标准页'].every((label) =>
+    styleOptionLabels.includes(label)
+  ),
+  JSON.stringify(styleOptionLabels)
+)
+
+await win15.locator('.mdf-menu-item[data-menu-label="管理主题与模板…"]').click()
+await win15.waitForSelector('.mdf-style-dialog')
+const builtinRows15 = await win15.$$eval('.mdf-style-row', (els) => els.map((el) => el.dataset.ref))
+check(
+  '管理器列出内置主题（模板在内置页签下）',
+  ['default', 'serif', 'plain', 'dark', 'mdmdt'].every((ref) => builtinRows15.includes(ref)),
+  JSON.stringify(builtinRows15)
+)
+await win15.screenshot({ path: path.join(root, 'verify', 'p1-style-manager.png') })
+
+/* 新建自定义主题：编辑器里填 CSS，实时预览立刻反映 */
+await win15.locator('.mdf-style-actions [data-action="style-create"]').click()
+await win15.waitForSelector('.mdf-style-editor')
+await win15.fill('.mdf-style-editor input[data-field="style-name"]', '夜航星')
+await win15.fill('.mdf-style-editor textarea[data-field="style-css"]', 'body { background: #010b2e; }')
+const previewCss = await until(
+  () =>
+    win15.evaluate(() => {
+      const frame = document.querySelector('.mdf-style-preview-frame')
+      return {
+        css: frame?.contentDocument?.querySelector('style')?.textContent ?? '',
+        text: frame?.contentDocument?.body?.innerText ?? ''
+      }
+    }),
+  (value) => value.css.includes('#010b2e'),
+  8000
+)
+check('主题编辑器：预览用上自定义 CSS 且渲染当前文档', previewCss.css.includes('#010b2e') && previewCss.text.includes('正文第一段'), previewCss.text.slice(0, 40))
+await win15.screenshot({ path: path.join(root, 'verify', 'p1-style-editor.png') })
+await win15.locator('.mdf-style-editor [data-action="style-save"]').click()
+await win15.waitForSelector('.mdf-style-editor', { state: 'detached' })
+const createdRows15 = await until(styleRows15, (rows) => rows.some((row) => row.name === '夜航星'), 6000)
+check(
+  '新建主题后出现在列表并设为当前',
+  createdRows15.some((row) => row.name === '夜航星' && row.current),
+  JSON.stringify(createdRows15)
+)
+const storedThemes15 = existsSync(path.join(styleRoot15, 'themes')) ? readdirSync(path.join(styleRoot15, 'themes')) : []
+check('主题条目存在用户目录（中文名不进文件名）', storedThemes15.filter((name) => name.endsWith('.json')).length === 1, JSON.stringify(storedThemes15))
+
+/* 导入 .css → 设为当前；再导出自定义主题为 .css */
+await app15.evaluate(({ dialog }, file) => {
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [file] })
+}, importCssFile)
+await win15.locator('.mdf-style-actions [data-action="style-import"]').click()
+const importedRows15 = await until(styleRows15, (rows) => rows.some((row) => row.name === '导入-样式'), 8000)
+check(
+  '导入 css 成为新主题并设为当前',
+  importedRows15.some((row) => row.name === '导入-样式' && row.current),
+  JSON.stringify(importedRows15)
+)
+await app15.evaluate(({ dialog }, file) => {
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: file })
+}, styleOutCss)
+await win15.locator('.mdf-style-row', { hasText: '导入-样式' }).locator('[data-action="style-export"]').click()
+await until(() => existsSync(styleOutCss), (ok) => ok === true, 8000)
+check('导出自定义主题为 css 文件', (readSafe(styleOutCss) ?? '').includes('#abcdef'), readSafe(styleOutCss) ?? '')
+
+/* 删除要过确认框；删掉当前主题后回落内置 */
+await win15.locator('.mdf-style-row', { hasText: '导入-样式' }).locator('[data-action="style-delete"]').click()
+await win15.waitForSelector('.mdf-dialog')
+check('删除主题有确认框', (await dialogText(win15)).includes('导入-样式'), await dialogText(win15))
+await answer(win15, '删除')
+const afterDelete15 = await until(styleRows15, (rows) => !rows.some((row) => row.name === '导入-样式'), 6000)
+check('删除后条目从列表消失', !afterDelete15.some((row) => row.name === '导入-样式'), JSON.stringify(afterDelete15))
+await win15.locator('.mdf-style-row', { hasText: '夜航星' }).locator('[data-action="style-use"]').click()
+await win15.waitForTimeout(200)
+
+/* 页面模板：缺 {{content}} 被拦下；补齐后保存并设为当前 */
+await win15.locator('.mdf-style-tab[data-tab="template"]').click()
+await win15.waitForTimeout(200)
+const tplRows15 = await win15.$$eval('.mdf-style-row', (els) => els.map((el) => el.dataset.ref))
+check('模板页列出内置标准页', tplRows15.includes('builtin'), JSON.stringify(tplRows15))
+await win15.locator('.mdf-style-actions [data-action="style-create"]').click()
+await win15.waitForSelector('.mdf-style-editor')
+await win15.fill('.mdf-style-editor input[data-field="style-name"]', '带页眉')
+await win15.fill('.mdf-style-editor textarea[data-field="style-html"]', '<html><body>没有占位符</body></html>')
+await win15.locator('.mdf-style-editor [data-action="style-save"]').click()
+await win15.waitForTimeout(250)
+const tplError15 = await win15.evaluate(
+  () => document.querySelector('.mdf-style-editor .mdf-form-error')?.textContent ?? ''
+)
+check('模板缺 {{content}} 保存被拦下', tplError15.includes('{{content}}'), tplError15)
+const tplSource = [
+  '<!doctype html>',
+  '<html lang="{{lang}}">',
+  '<head><meta charset="utf-8"><title>{{title}}</title>{{style}}</head>',
+  '<body><div class="my-shell"><p class="shell-note">由模板包了一层</p>{{content}}</div></body>',
+  '</html>'
+].join('\n')
+await win15.fill('.mdf-style-editor textarea[data-field="style-html"]', tplSource)
+await win15.locator('.mdf-style-editor [data-action="style-save"]').click()
+await win15.waitForSelector('.mdf-style-editor', { state: 'detached' })
+await win15.locator('.mdf-style-dialog [data-action="style-manager-done"]').click()
+await win15.waitForSelector('.mdf-style-dialog', { state: 'detached' })
+const styleStatus15 = await win15.textContent('#status')
+check('状态栏反映新建的模板', styleStatus15.includes('带页眉'), styleStatus15)
+
+/* 导出 HTML：自定义主题 CSS + Monokai 高亮 + 自定义页面模板一起生效 */
+await openOptions15()
+await win15.locator('.mdf-menu-item[data-menu-label="Monokai"]').click()
+await win15.waitForTimeout(150)
+await win15.keyboard.press('Escape')
+await win15.waitForTimeout(150)
+const themeHtml15 = await exportHtml15(styleHtmlStar)
+check(
+  '导出 HTML 带自定义主题与 Monokai 高亮',
+  themeHtml15.includes('#010b2e') && themeHtml15.includes('pre { background: #272822; }'),
+  themeHtml15.slice(0, 60)
+)
+const tplHtml15 = await exportHtml15(styleHtmlTpl)
+check(
+  '导出 HTML 套用页面模板（页眉与占位符替换）',
+  tplHtml15.includes('shell-note') &&
+    tplHtml15.includes('<article class="mdf-doc">') &&
+    tplHtml15.includes('<title>新手记标题</title>'),
+  tplHtml15.slice(0, 80)
+)
+
 await app15.close()
 
 const windowStateFile = path.join(process.env.APPDATA ?? homedir(), 'mdforge-editor', 'window-state.json')
 check('关闭时记住窗口尺寸位置', existsSync(windowStateFile), windowStateFile)
+const sessionStyles15 = readSafe(path.join(userData, 'session.json')) ?? ''
+check(
+  '自定义主题与模板的引用随会话持久化',
+  sessionStyles15.includes('"theme": "custom:') && sessionStyles15.includes('"template": "custom:'),
+  sessionStyles15.slice(0, 160)
+)
 check('全流程不使用原生对话框', nativeDialogs === 0, `count=${nativeDialogs}`)
 check('渲染进程无未捕获错误', pageErrors.length === 0, pageErrors.join(' | '))
 if (consoleErrors.length > 0) console.log(`控制台错误：\n  ${consoleErrors.slice(0, 6).join('\n  ')}`)

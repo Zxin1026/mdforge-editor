@@ -6,6 +6,7 @@ import {
   DEFAULT_FONT_SIZE,
   ENCODING_CHOICES,
   PAPER_SIZES,
+  customRefOf,
   normalizeContentWidth,
   normalizeFontSize,
   normalizeViewMode,
@@ -18,6 +19,7 @@ import {
   type AssetReport,
   type ChoosableEncoding,
   type ContentWidth,
+  type CustomStyleLibrary,
   type DocDraft,
   type EditorFontSize,
   type Eol,
@@ -27,6 +29,7 @@ import {
   type FileResult,
   type FileSnapshot,
   type LinkIndexResult,
+  type PageTemplate,
   type ViewMode
 } from '../../shared/ipc'
 import type { EditorAction, EditorFacts } from './editor/actions'
@@ -41,15 +44,26 @@ import {
   ASSET_MODES,
   ASSET_MODE_LABELS,
   ASSET_MODE_NOTES,
+  HIGHLIGHT_CHOICES,
   MARGINS,
   MARGIN_LABELS,
   PAPER_LABELS,
   THEMES,
-  THEME_LABELS
+  highlightLabel,
+  templateLabel,
+  themeLabel
 } from './export/options'
 import { buildHtml, deriveTitle, renderBody, renderText } from './export/html'
-import { cssFor } from './export/export-css'
 import { buildSitePlan } from './export/site'
+import {
+  cssForRef,
+  customTemplates,
+  customThemes,
+  setStyleLibrary,
+  templateRefExists,
+  themeRefExists
+} from './export/style-lib'
+import { openStyleManager } from './style-manager'
 import { frontMatterTextOf, parseFrontMatter, readFields } from './editor/frontmatter-yaml'
 import type { MenuEntry, MenuHandle } from './menu'
 import { openMenu } from './menu'
@@ -137,6 +151,8 @@ export class Workspace {
   private fontSizeLevel: EditorFontSize = DEFAULT_FONT_SIZE
   private contentWidthMode: ContentWidth = DEFAULT_CONTENT_WIDTH
   private exportOptions: ExportOptions = { ...DEFAULT_EXPORT_OPTIONS }
+  /** 自定义导出主题与页面模板：主进程存的条目，菜单与管理器都从它读 */
+  private styleLibrary: CustomStyleLibrary = { themes: [], templates: [] }
   /** 已经弹出外部修改确认框的标签，避免同一份改动叠两层框 */
   private notifying = new Set<string>()
   /** 关窗确认进行中：主进程重复询问时不再叠第二个框 */
@@ -945,13 +961,57 @@ export class Workspace {
         run: () => this.setExportOptions({ toc: !o.toc })
       },
       ...THEMES.map<MenuEntry>((theme) => ({
-        label: THEME_LABELS[theme],
+        label: themeLabel(theme),
         group: '主题',
         checked: theme === o.theme,
         hint: theme === o.theme ? '当前' : undefined,
         keepOpen: true,
         run: () => this.setExportOptions({ theme })
       })),
+      ...customThemes().map<MenuEntry>((theme) => {
+        const ref = customRefOf(theme.id)
+        return {
+          label: theme.name,
+          group: '主题',
+          checked: ref === o.theme,
+          hint: ref === o.theme ? '当前' : '自定义',
+          keepOpen: true,
+          run: () => this.setExportOptions({ theme: ref })
+        }
+      }),
+      {
+        label: '管理主题与模板…',
+        group: '主题',
+        hint: '自定义 CSS / 导入导出',
+        run: () => void this.openStyleManager()
+      },
+      ...HIGHLIGHT_CHOICES.map<MenuEntry>((highlight) => ({
+        label: highlightLabel(highlight),
+        group: '代码高亮',
+        checked: highlight === o.highlight,
+        hint: highlight === 'auto' ? '用主题自带配色' : undefined,
+        keepOpen: true,
+        run: () => this.setExportOptions({ highlight })
+      })),
+      {
+        label: '内置标准页',
+        group: '页面模板',
+        checked: o.template === 'builtin',
+        hint: o.template === 'builtin' ? '当前' : undefined,
+        keepOpen: true,
+        run: () => this.setExportOptions({ template: 'builtin' })
+      },
+      ...customTemplates().map<MenuEntry>((template) => {
+        const ref = customRefOf(template.id) as PageTemplate
+        return {
+          label: template.name,
+          group: '页面模板',
+          checked: ref === o.template,
+          hint: ref === o.template ? '当前' : '自定义',
+          keepOpen: true,
+          run: () => this.setExportOptions({ template: ref })
+        }
+      }),
       ...PAPER_SIZES.map<MenuEntry>((paper) => ({
         label: PAPER_LABELS[paper],
         group: '纸张',
@@ -972,6 +1032,53 @@ export class Workspace {
   private setExportOptions(patch: Partial<ExportOptions>): void {
     this.exportOptions = { ...this.exportOptions, ...patch }
     this.setMessage(`导出设置：${describeExportOptions(this.exportOptions)}`)
+    this.schedulePersist()
+  }
+
+  /** 导出选项 → 管理主题与模板…：列表动作全部走管理器，回来时库与选项已同步 */
+  async openStyleManager(): Promise<void> {
+    await this.refreshStyleLibrary()
+    openStyleManager({
+      library: () => this.styleLibrary,
+      currentTheme: () => this.exportOptions.theme,
+      currentTemplate: () => this.exportOptions.template,
+      source: () => {
+        const tab = this.active()
+        if (!tab) return null
+        return {
+          text: tab.state.text,
+          title: deriveTitle(tab.state.text, displayNameOf(tab.state)),
+          path: tab.state.path
+        }
+      },
+      options: () => this.exportOptions,
+      setLibrary: (library) => {
+        this.styleLibrary = library
+        setStyleLibrary(library)
+        this.ensureExportRefs()
+      },
+      chooseTheme: (ref) => this.setExportOptions({ theme: ref }),
+      chooseTemplate: (ref) => this.setExportOptions({ template: ref }),
+      notify: (text) => this.setMessage(text)
+    })
+  }
+
+  private async refreshStyleLibrary(): Promise<void> {
+    const library = await window.mdforge.styleList()
+    this.styleLibrary = library
+    setStyleLibrary(library)
+  }
+
+  /** 会话里的自定义主题/模板被删之后回落内置，导出不会引用到不存在的条目 */
+  private ensureExportRefs(): void {
+    const themeOk = themeRefExists(this.exportOptions.theme)
+    const templateOk = templateRefExists(this.exportOptions.template)
+    if (themeOk && templateOk) return
+    this.exportOptions = {
+      ...this.exportOptions,
+      theme: themeOk ? this.exportOptions.theme : DEFAULT_EXPORT_OPTIONS.theme,
+      template: templateOk ? this.exportOptions.template : DEFAULT_EXPORT_OPTIONS.template
+    }
     this.schedulePersist()
   }
 
@@ -1150,7 +1257,7 @@ export class Workspace {
         title,
         author: author === '' ? undefined : author,
         chapters,
-        css: cssFor(this.exportOptions.theme)
+        css: cssForRef(this.exportOptions.theme, this.exportOptions.highlight)
       })
       if (!response.ok) {
         this.notify(response.error)
@@ -2023,6 +2130,8 @@ export class Workspace {
     this.favorites = session?.favorites ?? []
     this.autoSave = session?.autoSave ?? true
     this.exportOptions = { ...DEFAULT_EXPORT_OPTIONS, ...session?.export }
+    await this.refreshStyleLibrary()
+    this.ensureExportRefs()
     this.zoomLevel = normalizeZoom(session?.zoom) ?? 1
     if (this.zoomLevel !== 1) void window.mdforge.setZoom(this.zoomLevel)
     this.fontSizeLevel = normalizeFontSize(session?.fontSize) ?? DEFAULT_FONT_SIZE
@@ -2104,12 +2213,10 @@ function assetNote(report: AssetReport, pdf: boolean): string {
 }
 
 function describeExportOptions(options: ExportOptions): string {
-  const parts = [
-    `图片 ${ASSET_MODE_LABELS[options.assets]}`,
-    `主题 ${THEME_LABELS[options.theme]}`,
-    `纸张 ${PAPER_LABELS[options.paper]}`,
-    `边距 ${MARGIN_LABELS[options.margin]}`
-  ]
+  const parts = [`图片 ${ASSET_MODE_LABELS[options.assets]}`, `主题 ${themeLabel(options.theme)}`]
+  if (options.highlight !== 'auto') parts.push(`高亮 ${highlightLabel(options.highlight)}`)
+  if (options.template !== 'builtin') parts.push(`模板 ${templateLabel(options.template)}`)
+  parts.push(`纸张 ${PAPER_LABELS[options.paper]}`, `边距 ${MARGIN_LABELS[options.margin]}`)
   if (options.toc) parts.unshift('带目录')
   return parts.join(' · ')
 }

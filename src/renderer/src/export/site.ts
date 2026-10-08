@@ -1,7 +1,8 @@
 import { DEFAULT_EXPORT_OPTIONS, type BatchFileInput, type ExportOptions } from '../../../shared/ipc'
 import { dirOfPath, relativeBetween, relativePosix, resolvePath } from '../paths'
-import { cssFor } from './export-css'
 import { buildDocHtml, deriveTitle, escapeHtml, renderText } from './html'
+import { applyTemplate, BUILTIN_TEMPLATE_HTML } from './page-template'
+import { cssForRef, templateHtmlForRef } from './style-lib'
 
 export interface SiteDocInput {
   path: string
@@ -174,17 +175,7 @@ export function buildIndexHtml(input: {
   const data = JSON.stringify(input.search).replace(/</g, '\\u003c')
   const generated = new Date().toLocaleString('zh-CN')
 
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(input.title)}</title>
-<style>${cssFor(input.options.theme)}
-${INDEX_CSS}</style>
-</head>
-<body>
-<article class="mdf-doc">
+  const content = `<article class="mdf-doc">
 <header class="mdf-site-head">
 <h1>${escapeHtml(input.title)}</h1>
 <p class="mdf-site-meta">由 MDForge 导出 · ${input.entries.length} 篇文档 · ${escapeHtml(generated)}</p>
@@ -198,8 +189,16 @@ ${parts.join('\n')}
 </div>
 </article>
 <script>window.__MDF_INDEX__=${data};</script>
-<script>${SEARCH_SCRIPT}</script>
-</body>
-</html>
-`
+<script>${SEARCH_SCRIPT}</script>`
+
+  const css = cssForRef(input.options.theme, input.options.highlight)
+  const template = templateHtmlForRef(input.options.template) ?? BUILTIN_TEMPLATE_HTML
+  return applyTemplate(template, {
+    title: escapeHtml(input.title),
+    lang: 'zh-CN',
+    style: `<style>${css}
+${INDEX_CSS}</style>`,
+    nav: '',
+    content
+  })
 }
