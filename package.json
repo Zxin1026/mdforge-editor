@@ -1,6 +1,6 @@
 {
   "name": "mdforge-editor",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "private": true,
   "description": "MDForge - a Windows Markdown editor with decoration-based live rendering",
   "main": "out/main/index.js",
@@ -36,6 +36,9 @@
     "electron": "^44.5.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "hast-util-from-html-isomorphic": "^2.0.0",
+    "katex": "^0.19.0",
+    "mermaid": "^12.1.0",
     "oxlint": "^1.87.0",
     "playwright-core": "^1.63.0",
     "prettier": "^3.9.9",
@@ -46,6 +49,7 @@
     "rehype-stringify": "^10.0.1",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
     "turndown": "^7.2.4",
@@ -57,11 +61,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
-    "hast-util-from-html-isomorphic": "^2.0.0",
     "iconv-lite": "^0.7.3",
-    "jschardet": "^4.0.0",
-    "katex": "^0.19.0",
-    "mermaid": "^12.1.0",
-    "remark-math": "^6.0.0"
+    "jschardet": "^4.0.0"
   }
 }

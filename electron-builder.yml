@@ -13,6 +13,11 @@ electronLanguages:
   - en-US
 files:
   - out/**
+# 注意：主进程会把 dependencies 里的包当外部依赖（out/main 里是 require("…")），
+# 这些包由 electron-builder 自动拷进 asar，不能排除 node_modules。
+# 只被渲染进程用到的库（katex / mermaid / remark-math 等）请留在 devDependencies——
+# 它们已由 electron-vite 打进 out/renderer，放进 dependencies 会让整棵依赖树
+# （mermaid 一棵就一百多 MB）被拷进 asar，安装包白涨近 40 MB。
 win:
   icon: build/icon.png
   target:
