@@ -1,14 +1,18 @@
 /**
  * DOCX 导出：markdown → mdast → WordprocessingML（<w:body> 片段）。
- * 图片与超链接在正文里留 id 占位，主进程负责读图、补 drawing 与关系表。
+ * 图片与超链接在正文里留 id 占位，主进程负责读图、补 drawing 与关系表；
+ * 公式在这里栅格化成 PNG 后随图片占位一起走，Word 里直接是渲染好的公式。
  */
 
 import remarkFrontmatter from 'remark-frontmatter'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
 import { DOCX_NUM_BULLET, DOCX_NUM_ORDERED, type DocxImageRef, type DocxLinkRef } from '../../../shared/ipc'
 import { resolveLocalPath, widthFromTitle } from '../editor/assets'
+import { rasterizeMath, type MathImage } from './math-image'
+import { rasterizeMermaid, type MermaidImage } from './mermaid-image'
 
 interface MdNode {
   type: string
@@ -77,20 +81,68 @@ const TBL_BORDERS =
     .join('') +
   '</w:tblBorders>'
 
+function mathKey(source: string, display: boolean): string {
+  return `${display ? 'D' : 'I'}\n${source}`
+}
+
+interface RenderedBlocks {
+  math: Map<string, MathImage | null>
+  mermaid: Map<string, MermaidImage | null>
+}
+
+/** 公式与 mermaid 图先统一栅格化：同一段源码只画一次，画不出来的记 null 退回文本 */
+async function rasterizeBlocks(children: readonly MdNode[]): Promise<RenderedBlocks> {
+  const mathPairs = new Map<string, { source: string; display: boolean }>()
+  const mermaidPairs = new Set<string>()
+  const collect = (nodes: readonly MdNode[]): void => {
+    for (const node of nodes) {
+      if (node.type === 'inlineMath' || node.type === 'math') {
+        const display = node.type === 'math'
+        const source = (node.value ?? '').trim()
+        mathPairs.set(mathKey(source, display), { source, display })
+      } else if (node.type === 'code' && node.lang === 'mermaid') {
+        mermaidPairs.add((node.value ?? '').trim())
+      }
+      if (node.children !== undefined) collect(node.children)
+    }
+  }
+  collect(children)
+
+  const math = new Map<string, MathImage | null>()
+  for (const [key, item] of mathPairs) math.set(key, await rasterizeMath(item.source, item.display))
+  const mermaid = new Map<string, MermaidImage | null>()
+  for (const source of mermaidPairs) mermaid.set(source, await rasterizeMermaid(source))
+  return { math, mermaid }
+}
+
 /**
  * 构建 DOCX 正文 XML。docPath 为 null（未保存文档）时相对图片路径解析不了，
  * 会退化成 alt 文字占位；绝对路径的图片照常走占位注释。
  */
-export function buildDocx(markdownText: string, docPath: string | null): DocxBuild {
+export async function buildDocx(markdownText: string, docPath: string | null): Promise<DocxBuild> {
   const tree = unified()
     .use(remarkParse)
     .use(remarkGfm)
+    .use(remarkMath)
     .use(remarkFrontmatter, ['yaml'])
     .parse(markdownText) as unknown as MdNode
 
   const links: DocxLinkRef[] = []
   const images: DocxImageRef[] = []
+  const blocks = await rasterizeBlocks(tree.children ?? [])
   let seq = 0
+
+  function mathRun(node: MdNode, display: boolean): string {
+    const source = (node.value ?? '').trim()
+    const image = blocks.math.get(mathKey(source, display))
+    if (image === undefined || image === null) {
+      // 无 DOM（单测）或渲染失败：至少把公式源码留在文档里，不静默丢内容
+      return textRun(display ? `$$${source}$$` : `$${source}$`, { code: true })
+    }
+    const id = `I${++seq}`
+    images.push({ id, path: '公式', widthPx: image.width, bytes: image.bytes })
+    return `<w:r><!--mdfimg:${id}--></w:r>`
+  }
 
   function imageRun(node: MdNode): string {
     const url = (node.url ?? '').trim()
@@ -118,17 +170,31 @@ export function buildDocx(markdownText: string, docPath: string | null): DocxBui
         links.push({ id, target: node.url ?? '' })
         out.push(`<w:hyperlink r:id="${id}">${inlineRuns(node.children ?? [], style)}</w:hyperlink>`)
       } else if (node.type === 'image') out.push(imageRun(node))
+      else if (node.type === 'inlineMath') out.push(mathRun(node, false))
       else if (node.type === 'html') continue
       else if (node.children !== undefined) out.push(inlineRuns(node.children, style))
     }
     return out.join('')
   }
 
-  function codeBlock(node: MdNode): string {
+  function codeBlockLines(node: MdNode): string {
     return (node.value ?? '')
       .split('\n')
       .map((line) => paragraph('<w:pStyle w:val="CodeBlock"/>', textRun(line, { code: true })))
       .join('')
+  }
+
+  /** mermaid 围栏：画成图片居中摆放；渲染不出来的环境（单测等）退回代码块 */
+  function codeBlock(node: MdNode): string {
+    if (node.lang === 'mermaid') {
+      const image = blocks.mermaid.get((node.value ?? '').trim())
+      if (image !== undefined && image !== null) {
+        const id = `I${++seq}`
+        images.push({ id, path: '图表', widthPx: image.width, bytes: image.bytes })
+        return paragraph('<w:jc w:val="center"/>', `<w:r><!--mdfimg:${id}--></w:r>`)
+      }
+    }
+    return codeBlockLines(node)
   }
 
   function tableXml(node: MdNode): string {
@@ -187,6 +253,8 @@ export function buildDocx(markdownText: string, docPath: string | null): DocxBui
       return paragraph(`<w:pStyle w:val="Heading${depth}"/>`, inlineRuns(node.children ?? []))
     }
     if (node.type === 'code') return codeBlock(node)
+    // 行间公式单独成段、居中；内联公式在段落里已经处理
+    if (node.type === 'math') return paragraph('<w:jc w:val="center"/>', mathRun(node, true))
     if (node.type === 'blockquote') {
       return (node.children ?? []).map((child) => blockXml(child, true)).join('')
     }

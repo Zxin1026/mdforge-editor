@@ -49,7 +49,7 @@ export async function scanTags(dir: string): Promise<TagIndexResult> {
     })
   }
 
-  const { files } = await walkMarkdownFiles(absolute)
+  const { files, truncated } = await walkMarkdownFiles(absolute)
   const refs: DocRef[] = []
   const docs: TagIndexResult['docs'] = []
 
@@ -72,5 +72,5 @@ export async function scanTags(dir: string): Promise<TagIndexResult> {
     docs.push({ path: file.path, name: file.name, tags })
   }
 
-  return { files: refs, docs }
+  return { files: refs, docs, truncated }
 }

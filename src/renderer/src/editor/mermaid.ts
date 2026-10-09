@@ -93,7 +93,11 @@ function load(): Promise<typeof import('mermaid').default> {
  * 因此按"主题 + 源码"缓存结果；缓存只保留最近若干条，避免长文档堆积。
  */
 export async function renderMermaid(code: string): Promise<string> {
-  const theme = currentTheme()
+  return renderMermaidWithTheme(code, currentTheme())
+}
+
+/** 指定配色渲染：导出链按导出主题取 light/dark，与编辑期共用同一套 themeVariables */
+export async function renderMermaidWithTheme(code: string, theme: EditorTheme): Promise<string> {
   const key = `${theme}\n${code}`
   const cached = cache.get(key)
   if (cached !== undefined) return cached

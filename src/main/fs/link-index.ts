@@ -38,7 +38,7 @@ export async function scanLinks(dir: string): Promise<LinkIndexResult> {
     })
   }
 
-  const { files } = await walkMarkdownFiles(absolute)
+  const { files, truncated } = await walkMarkdownFiles(absolute)
   const byKey = new Map<string, DocRef>()
   for (const file of files) {
     byKey.set(keyOf(file.path), { path: file.path, name: file.name })
@@ -84,5 +84,5 @@ export async function scanLinks(dir: string): Promise<LinkIndexResult> {
     }
   }
 
-  return { files: [...byKey.values()], links }
+  return { files: [...byKey.values()], links, truncated }
 }

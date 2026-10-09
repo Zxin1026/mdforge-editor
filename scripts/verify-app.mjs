@@ -158,6 +158,23 @@ const readSafe = (target) => {
   }
 }
 
+/* 文件出现 ≠ 内容写完：writeFile 先建空文件再写字节，毫秒级空窗里直接读会拿到空串 */
+const readWritten = (target, timeoutMs = 20000) =>
+  until(() => readSafe(target) ?? '', (text) => text.length > 0, timeoutMs, 60)
+const readWrittenBytes = (target, timeoutMs = 20000) =>
+  until(
+    () => {
+      try {
+        return readFileSync(target)
+      } catch {
+        return Buffer.alloc(0)
+      }
+    },
+    (buffer) => buffer.length > 0,
+    timeoutMs,
+    60
+  )
+
 const workDir = mkdtempSync(path.join(tmpdir(), 'mdforge-e2e-'))
 mkdirSync(path.join(workDir, 'assets'), { recursive: true })
 writeFileSync(path.join(workDir, 'assets', 'preview.png'), PNG)
@@ -167,11 +184,40 @@ const gbkBytes = asGbk(GBK_TEXT_LF)
 writeFileSync(fixture, gbkBytes)
 
 /* 上一次没跑完的验证会留下崩溃草稿，首个窗口会先弹恢复框挡住所有点击：开跑前清干净 */
+/* 窗口被遮挡/后台化会被 Chromium 节流：截图与输入会偶发卡死，测试期一律关掉 */
+const THROTTLE_SWITCHES = [
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-background-timer-throttling',
+  '--disable-features=CalculateNativeWinOcclusion'
+]
+
+/* 截图只是留档：个别窗口偶发取不到帧（CDP 截图挂满 30s 超时、拖垮整轮），
+   统一降到 8s，失败只记一行并继续 */
+const launchApp = async (options) => {
+  const launched = await _electron.launch(options)
+  const originalFirstWindow = launched.firstWindow.bind(launched)
+  launched.firstWindow = async () => {
+    const window = await originalFirstWindow()
+    const originalShot = window.screenshot.bind(window)
+    window.screenshot = async (shotOptions = {}) => {
+      try {
+        return await originalShot({ timeout: 8000, ...shotOptions })
+      } catch (error) {
+        console.log(`  截图失败（已跳过）：${shotOptions.path ?? ''} ${error.message.split('\n')[0]}`)
+        return Buffer.alloc(0)
+      }
+    }
+    return window
+  }
+  return launched
+}
+
 resetAppData()
 
-const app = await _electron.launch({
+const app = await launchApp({
   executablePath: require('electron'),
-  args: [root, fixture],
+  args: [root, ...THROTTLE_SWITCHES, fixture],
   cwd: root
 })
 
@@ -309,9 +355,9 @@ if (existsSync(HANDBOOK)) {
   const copy = path.join(workDir, '手册副本.md')
   copyFileSync(HANDBOOK, copy)
 
-  const app2 = await _electron.launch({
+  const app2 = await launchApp({
     executablePath: require('electron'),
-    args: [root, copy],
+    args: [root, ...THROTTLE_SWITCHES, copy],
     cwd: root
   })
   const win2 = await app2.firstWindow()
@@ -381,7 +427,7 @@ function readLines(w) {
   return w.$$eval('.cm-line', (els) => els.filter((e) => e.offsetParent !== null).map((e) => e.innerText))
 }
 
-const app3 = await _electron.launch({ executablePath: require('electron'), args: [root], cwd: root })
+const app3 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES], cwd: root })
 const win3 = await app3.firstWindow()
 win3.on('dialog', (d) => {
   nativeDialogs += 1
@@ -437,13 +483,19 @@ async function pickViewItem(submenu, item) {
   await win3.locator(`.mdf-menu--bar .mdf-menu-item[data-menu-label="${submenu}"]`).click()
   await win3.waitForTimeout(200)
   await win3.locator(`.mdf-menu--sub .mdf-menu-item[data-menu-label="${item}"]`).click()
-  await win3.waitForTimeout(200)
-  const mark = await win3.evaluate((label) => {
-    const found = [...document.querySelectorAll('.mdf-menu--sub .mdf-menu-item')].find(
-      (el) => el.dataset.menuLabel === label
-    )
-    return found?.querySelector('.mdf-menu-mark')?.textContent ?? ''
-  }, item)
+  /* 勾选标记随状态重建，可能晚一拍：读到非空（或超时）再走 */
+  const mark = await until(
+    () =>
+      win3.evaluate((label) => {
+        const found = [...document.querySelectorAll('.mdf-menu--sub .mdf-menu-item')].find(
+          (el) => el.dataset.menuLabel === label
+        )
+        return found?.querySelector('.mdf-menu-mark')?.textContent ?? ''
+      }, item),
+    (text) => text !== '',
+    1500,
+    80
+  )
   await win3.keyboard.press('Escape')
   await win3.waitForTimeout(150)
   return mark
@@ -547,17 +599,25 @@ check('替换全部生效', l3[0] === 'bye bye bye', l3[0])
 
 await replaceAll(true, '见 [示例](https://example.com) 结束')
 await win3.waitForTimeout(150)
-const linkBox = await win3.locator('.mdf-link').first().boundingBox()
-if (linkBox) {
+/* 悬停提示偶发迟到或落点漂移：重取位置、重挪鼠标，最多三轮 */
+let hoverText = ''
+for (let attempt = 0; attempt < 3 && !hoverText.includes('https://example.com'); attempt += 1) {
+  const linkBox = await win3.locator('.mdf-link').first().boundingBox()
+  if (!linkBox) break
   await win3.mouse.move(linkBox.x + linkBox.width / 2, linkBox.y + linkBox.height / 2)
-  await win3.waitForTimeout(250)
-  const hoverText = await win3.$$eval('.mdf-hover', (els) =>
-    els.filter((e) => e.style.display !== 'none').map((e) => e.textContent)
+  hoverText = await until(
+    () =>
+      win3.$$eval('.mdf-hover', (els) =>
+        els
+          .filter((e) => e.style.display !== 'none')
+          .map((e) => e.textContent)
+          .join('')
+      ),
+    (text) => text.includes('https://example.com'),
+    1200
   )
-  check('悬浮链接显示目标地址', hoverText.join('').includes('https://example.com'), JSON.stringify(hoverText))
-} else {
-  check('悬浮链接显示目标地址', false, '找不到 .mdf-link 位置')
 }
+check('悬浮链接显示目标地址', hoverText.includes('https://example.com'), hoverText || '悬停提示未出现')
 
 const tabsBefore = await win3.locator('.tab').count()
 await win3.keyboard.press('Control+n')
@@ -587,7 +647,7 @@ const relDir = mkdtempSync(path.join(tmpdir(), 'mdforge-rel-'))
 writeFileSync(path.join(relDir, 'sibling.md'), '# 兄弟文档\n')
 const baseFile = path.join(relDir, 'base.md')
 writeFileSync(baseFile, '[去](./sibling.md)\n')
-const app4 = await _electron.launch({ executablePath: require('electron'), args: [root, baseFile], cwd: root })
+const app4 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, baseFile], cwd: root })
 const win4 = await app4.firstWindow()
 win4.on('dialog', (d) => {
   nativeDialogs += 1
@@ -612,7 +672,7 @@ await app4.close()
 /* 会话恢复：开一个文件 → 关闭 → 无文件参数重启应恢复标签 */
 const sessionTarget = path.join(relDir, 'session-target.md')
 writeFileSync(sessionTarget, '# 会话目标\n')
-const app5 = await _electron.launch({ executablePath: require('electron'), args: [root, sessionTarget], cwd: root })
+const app5 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, sessionTarget], cwd: root })
 const win5 = await app5.firstWindow()
 win5.on('dialog', (d) => {
   nativeDialogs += 1
@@ -623,7 +683,7 @@ await win5.waitForSelector('.cm-content')
 await win5.waitForTimeout(1000)
 await app5.close()
 
-const app6 = await _electron.launch({ executablePath: require('electron'), args: [root], cwd: root })
+const app6 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES], cwd: root })
 const win6 = await app6.firstWindow()
 win6.on('dialog', (d) => {
   nativeDialogs += 1
@@ -677,7 +737,7 @@ const RENDER_LINES = [
 const renderDoc = path.join(renderDir, '渲染.md')
 writeFileSync(renderDoc, RENDER_LINES.join('\r\n'), 'utf8')
 
-const app7 = await _electron.launch({ executablePath: require('electron'), args: [root, renderDoc], cwd: root })
+const app7 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, renderDoc], cwd: root })
 const win7 = await app7.firstWindow()
 win7.on('dialog', (d) => {
   nativeDialogs += 1
@@ -815,26 +875,39 @@ check('撤销回退单元格修改', undoCell === '苹果', undoCell)
 await win7.screenshot({ path: path.join(root, 'verify', 'table-edit.png') })
 
 /* 表格结构按钮：悬停行首/列表头浮出加删按钮，落字后撤销回原样 */
+/* 按钮只在对应行/列头悬停时可点（pointer-events 随 :hover 开）；widget 重建会打断悬停链，
+   而 Playwright 的重试不会挪鼠标，会死锁到超时 —— 所以每轮挪开鼠标、重新悬停再点 */
+async function clickTableOp(scope, op) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await scope.hover()
+    try {
+      await scope.locator(`[data-op="${op}"]`).click({ timeout: 4000 })
+      return
+    } catch {
+      await win7.mouse.move(4, 4).catch(() => {})
+      await win7.waitForTimeout(150)
+    }
+  }
+}
+const rowFirst7 = win7.locator('.mdf-table-grid tbody tr').first()
+const colFirst7 = win7.locator('.mdf-table-grid thead th').first()
+const colSecond7 = win7.locator('.mdf-table-grid thead th').nth(1)
 const rowCount0 = await win7.locator('.mdf-table-grid tbody tr').count()
-await win7.locator('.mdf-table-grid tbody tr').first().hover()
-await win7.locator('.mdf-table-grid tbody tr').first().locator('[data-op="row-add"]').click()
+await clickTableOp(rowFirst7, 'row-add')
 await win7.waitForTimeout(350)
 check('行首 ＋ 插入一条空行', (await win7.locator('.mdf-table-grid tbody tr').count()) === rowCount0 + 1, '')
 
 const colCount0 = await win7.locator('.mdf-table-grid thead th').count()
-await win7.locator('.mdf-table-grid thead th').first().hover()
-await win7.locator('.mdf-table-grid thead th').first().locator('[data-op="col-add"]').click()
+await clickTableOp(colFirst7, 'col-add')
 await win7.waitForTimeout(350)
 check('列头 ＋ 插入一列', (await win7.locator('.mdf-table-grid thead th').count()) === colCount0 + 1, '')
 await win7.screenshot({ path: path.join(root, 'verify', 'table-ops.png') })
 
-await win7.locator('.mdf-table-grid tbody tr').first().hover()
-await win7.locator('.mdf-table-grid tbody tr').first().locator('[data-op="row-del"]').click()
+await clickTableOp(rowFirst7, 'row-del')
 await win7.waitForTimeout(350)
 check('行首 － 删掉一行', (await win7.locator('.mdf-table-grid tbody tr').count()) === rowCount0, '')
 
-await win7.locator('.mdf-table-grid thead th').nth(1).hover()
-await win7.locator('.mdf-table-grid thead th').nth(1).locator('[data-op="col-del"]').click()
+await clickTableOp(colSecond7, 'col-del')
 await win7.waitForTimeout(350)
 check('列头 － 删掉一列', (await win7.locator('.mdf-table-grid thead th').count()) === colCount0, '')
 
@@ -1064,8 +1137,9 @@ const previewCount = await win7.locator('.mdf-preview-img').count()
 check('光标移开后预览保持', previewCount >= 2, `count=${previewCount}`)
 await win7.screenshot({ path: path.join(root, 'verify', 'render-capabilities.png') })
 await win7.locator('.tab-close').first().click()
-await win7.waitForSelector('.mdf-dialog')
-await answer(win7, '不保存关闭')
+/* 粘贴到关窗之间隔了多个检查，自动保存（3s）可能已先落盘把标签变干净：有确认框才答 */
+await win7.waitForTimeout(500)
+if ((await win7.locator('.mdf-dialog').count()) > 0) await answer(win7, '不保存关闭')
 await win7.waitForTimeout(300)
 await app7.close()
 
@@ -1075,7 +1149,7 @@ const FL_DOC = path.join(flDir, '说明.md')
 writeFileSync(FL_DOC, '# 说明\r\n\r\n第一段\r\n', 'utf8')
 resetAppData()
 
-const app8 = await _electron.launch({ executablePath: require('electron'), args: [root, FL_DOC], cwd: root })
+const app8 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, FL_DOC], cwd: root })
 const win8 = await app8.firstWindow()
 win8.on('dialog', (d) => {
   nativeDialogs += 1
@@ -1269,7 +1343,7 @@ const DRAFT_DOC = path.join(flDir, '草稿.md')
 writeFileSync(DRAFT_DOC, '# 草稿\n', 'utf8')
 clearDrafts()
 
-const app9 = await _electron.launch({ executablePath: require('electron'), args: [root, DRAFT_DOC], cwd: root })
+const app9 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, DRAFT_DOC], cwd: root })
 const win9 = await app9.firstWindow()
 win9.on('pageerror', (e) => pageErrors.push(e.message))
 await win9.waitForSelector('.cm-content')
@@ -1282,7 +1356,7 @@ await win9.waitForTimeout(2000)
 check('未保存内容写成崩溃草稿', draftCount() >= 1, `drafts=${draftCount()}`)
 killApp(app9)
 
-const app10 = await _electron.launch({ executablePath: require('electron'), args: [root, DRAFT_DOC], cwd: root })
+const app10 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, DRAFT_DOC], cwd: root })
 const win10 = await app10.firstWindow()
 win10.on('pageerror', (e) => pageErrors.push(e.message))
 await win10.waitForSelector('.mdf-dialog', { timeout: 9000 })
@@ -1312,7 +1386,7 @@ const CLOSE_DOC = path.join(flDir, '关闭.md')
 writeFileSync(CLOSE_DOC, '# 关闭测试\n', 'utf8')
 clearDrafts()
 
-const app11 = await _electron.launch({ executablePath: require('electron'), args: [root, CLOSE_DOC], cwd: root })
+const app11 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, CLOSE_DOC], cwd: root })
 const win11 = await app11.firstWindow()
 win11.on('pageerror', (e) => pageErrors.push(e.message))
 await win11.waitForSelector('.cm-content')
@@ -1342,7 +1416,7 @@ await Promise.race([closing11, new Promise((resolve) => setTimeout(resolve, 3000
 // app11 是被硬杀的，它留下的崩溃草稿会在 app12 启动时先弹恢复框挡住点击：这里当作"用户已丢弃"清掉
 clearDrafts()
 
-const app12 = await _electron.launch({ executablePath: require('electron'), args: [root, CLOSE_DOC], cwd: root })
+const app12 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, CLOSE_DOC], cwd: root })
 const win12 = await app12.firstWindow()
 win12.on('pageerror', (e) => pageErrors.push(e.message))
 await win12.waitForSelector('.cm-content')
@@ -1400,7 +1474,7 @@ const EXP_SOURCE = [
 ].join('\r\n')
 writeFileSync(EXP_DOC, EXP_SOURCE, 'utf8')
 
-const app13 = await _electron.launch({ executablePath: require('electron'), args: [root, EXP_DOC], cwd: root })
+const app13 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, EXP_DOC], cwd: root })
 const win13 = await app13.firstWindow()
 win13.on('dialog', (d) => {
   nativeDialogs += 1
@@ -2171,7 +2245,7 @@ writeFileSync(
   JSON.stringify({ openDocs: [], active: null, recents: [recentFile], autoSave: false }, null, 2),
   'utf8'
 )
-const app14 = await _electron.launch({ executablePath: require('electron'), args: [root], cwd: root })
+const app14 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES], cwd: root })
 const win14 = await app14.firstWindow()
 win14.on('dialog', (d) => {
   nativeDialogs += 1
@@ -2231,9 +2305,9 @@ const p1Out = path.join(p1Dir, '网站')
 const p1Epub = path.join(p1Dir, 'book.epub')
 
 resetAppData()
-const app15 = await _electron.launch({
+const app15 = await launchApp({
   executablePath: require('electron'),
-  args: [root, path.join(p1Dir, 'index.md')],
+  args: [root, ...THROTTLE_SWITCHES, path.join(p1Dir, 'index.md')],
   cwd: root
 })
 const win15 = await app15.firstWindow()
@@ -2479,12 +2553,10 @@ check(
   JSON.stringify(exportLabels15)
 )
 await win15.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出静态站点…"]').click()
-await waitForFile(
-  () => existsSync(path.join(p1Out, 'index.html')) && existsSync(path.join(p1Out, 'search-index.json'))
-)
+/* 等最后一个产物（搜索索引）写完再读，避开 writeFile 建空文件的空窗 */
+const searchIndex = await readWritten(path.join(p1Out, 'search-index.json'))
 const siteIndex = readSafe(path.join(p1Out, 'index.html')) ?? ''
 const siteChild = readSafe(path.join(p1Out, 'notes', 'child.html')) ?? ''
-const searchIndex = readSafe(path.join(p1Out, 'search-index.json')) ?? ''
 check('静态站点：导航页含标题与搜索框', siteIndex.includes('新手记标题') && siteIndex.includes('mdf-q'), siteIndex.slice(0, 60))
 check('静态站点：页内返回目录、子页相对链接正确', siteChild.includes('href="../index.html"'), siteChild.slice(0, 80))
 check(
@@ -2513,8 +2585,7 @@ await win15.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 EPUB�
 await win15.waitForSelector('.mdf-dialog')
 check('EPUB 提供单篇/整本选择', (await dialogText(win15)).includes('整个文件夹成一本书'), await dialogText(win15))
 await answer(win15, '整个文件夹成一本书')
-await waitForFile(() => existsSync(p1Epub))
-const epubBytes = existsSync(p1Epub) ? readFileSync(p1Epub) : Buffer.alloc(0)
+const epubBytes = await readWrittenBytes(p1Epub)
 check(
   'EPUB 打包结构完整（两章、包描述、导航）',
   epubBytes.includes('application/epub+zip') &&
@@ -2569,8 +2640,7 @@ const exportHtml15 = async (target) => {
   await win15.locator('.mdf-menu--bar .mdf-menu-item[data-menu-label="导出"]').click()
   await win15.waitForSelector('.mdf-menu--sub')
   await win15.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 HTML…"]').click()
-  await until(() => existsSync(target), (ok) => ok === true, 20000)
-  return readSafe(target) ?? ''
+  return await readWritten(target)
 }
 const styleRows15 = () =>
   win15.$$eval('.mdf-style-row', (els) =>
@@ -2742,6 +2812,16 @@ writeFileSync(
     '',
     '![图](assets/shot.webp)',
     '',
+    '行内公式 $E=mc^2$ 一条。',
+    '',
+    '$$',
+    'x = \\frac{1}{2}',
+    '$$',
+    '',
+    '```mermaid',
+    'graph TD; A-->B;',
+    '```',
+    '',
     'filtertoken 排版样例一行。',
     ''
   ].join('\n'),
@@ -2757,7 +2837,7 @@ writeFileSync(path.join(p1Dir, '过滤靶.md'), '# 过滤靶\n\nfiltertoken 只�
 const p1bDocx = path.join(p1Dir, '样例.docx')
 const p1bOpml = path.join(p1Dir, '样例.opml')
 
-const app16 = await _electron.launch({ executablePath: require('electron'), args: [root, p1bDoc], cwd: root })
+const app16 = await launchApp({ executablePath: require('electron'), args: [root, ...THROTTLE_SWITCHES, p1bDoc], cwd: root })
 const win16 = await app16.firstWindow()
 win16.on('dialog', (d) => {
   nativeDialogs += 1
@@ -3051,8 +3131,7 @@ check(
   JSON.stringify(exportLabels16)
 )
 await win16.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 Word (DOCX)…"]').click()
-await waitForFile(() => existsSync(p1bDocx), 25000)
-const docxBytes16 = existsSync(p1bDocx) ? readFileSync(p1bDocx) : Buffer.alloc(0)
+const docxBytes16 = await readWrittenBytes(p1bDocx, 25000)
 check(
   'DOCX 包结构完整（样式/编号/图片部件）',
   docxBytes16.includes('word/styles.xml') &&
@@ -3071,19 +3150,43 @@ check(
 )
 const docxRels16 = inflateEntry(docxBytes16, 'word/_rels/document.xml.rels')
 check('DOCX 关系表含超链接与图片', docxRels16.includes('TargetMode="External"') && docxRels16.includes('media/image1.webp'), '')
+const docxEmbeds16 = docxXml16.match(/r:embed="I/g) ?? []
+check(
+  'DOCX 内嵌公式与图表的图片',
+  docxBytes16.includes('word/media/image2.png') &&
+    docxBytes16.includes('word/media/image3.png') &&
+    docxBytes16.includes('word/media/image4.png') &&
+    docxEmbeds16.length >= 4,
+  `embeds=${docxEmbeds16.length}`
+)
 
 await saveDialog16(p1bOpml)
 await menuOpen16('file')
 await menuPick16('导出')
 await win16.waitForSelector('.mdf-menu--sub')
 await win16.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 OPML 大纲…"]').click()
-await waitForFile(() => existsSync(p1bOpml), 15000)
-const opml16 = readSafe(p1bOpml) ?? ''
+const opml16 = await readWritten(p1bOpml, 15000)
 check(
   'OPML 大纲含标题层级、任务标记与备注',
   opml16.includes('<opml version="2.0">') && opml16.includes('text="小节"') && opml16.includes('☐') && opml16.includes('_note='),
   opml16.replace(/\n/g, ' ').slice(0, 90)
 )
+
+/* P0 导出链：公式与图表进 HTML（katex 渲染 + mermaid 内联 SVG + 字体随页内嵌） */
+const p1bMathHtml = path.join(p1Dir, '样例-公式.html')
+await saveDialog16(p1bMathHtml)
+await menuOpen16('file')
+await menuPick16('导出')
+await win16.waitForSelector('.mdf-menu--sub')
+await win16.locator('.mdf-menu--sub .mdf-menu-item[data-menu-label="导出 HTML…"]').click()
+const mathHtml16 = await readWritten(p1bMathHtml, 25000)
+check(
+  '导出 HTML 渲染行内与行间公式',
+  mathHtml16.includes('class="katex"') && mathHtml16.includes('mdf-math-inline') && mathHtml16.includes('mdf-math-block'),
+  ''
+)
+check('导出 HTML 内嵌公式字体', mathHtml16.includes('data:font/woff2;base64') && !mathHtml16.includes('url(fonts/'), '')
+check('导出 HTML 把 mermaid 画成内联 SVG', mathHtml16.includes('mdf-mermaid') && mathHtml16.includes('<svg'), '')
 
 /* P1-7 剪贴板：菜单复制写 HTML 格式；图片管理器复制图片写位图 */
 await win16.locator('.cm-line:visible').first().click()
@@ -3143,12 +3246,12 @@ await win16.keyboard.press('Control+Shift+K')
 await win16.waitForTimeout(250)
 await saveDoc(win16)
 await win16.waitForTimeout(700)
-check('切换代码块包裹段落', fenceCount16(convFile16()) === 4, `fences=${fenceCount16(convFile16())}`)
+check('切换代码块包裹段落', fenceCount16(convFile16()) === 6, `fences=${fenceCount16(convFile16())}`)
 await win16.keyboard.press('Control+Shift+K')
 await win16.waitForTimeout(250)
 await saveDoc(win16)
 await win16.waitForTimeout(700)
-check('再按一次拆掉围栏', fenceCount16(convFile16()) === 2, `fences=${fenceCount16(convFile16())}`)
+check('再按一次拆掉围栏', fenceCount16(convFile16()) === 4, `fences=${fenceCount16(convFile16())}`)
 await clickLine16('待办')
 await win16.keyboard.press('Control+Shift+C')
 await win16.waitForTimeout(250)

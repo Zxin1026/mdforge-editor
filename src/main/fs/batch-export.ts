@@ -6,8 +6,6 @@ import { FileOpError } from './error'
 import { processHtmlAssets, safeRelative } from './export-assets'
 import { grantFolder } from './file-store'
 
-const MAX_FILES = 1000
-
 /** 静态站点/批量导出的输出位置：目录选择框（允许现场新建） */
 export async function chooseExportFolder(parent: BrowserWindow | null): Promise<string | null> {
   const options: Electron.OpenDialogOptions = {
@@ -25,6 +23,7 @@ export async function chooseExportFolder(parent: BrowserWindow | null): Promise<
 /**
  * 批量导出：按相对结构写页面，图片经 processHtmlAssets 统一处理，
  * 单个页面失败不打断整批（失败原因逐条回给界面）。
+ * 页面数上限在参数校验（main/ipc.ts）里执行，这里按 totalFiles 如实报告截断。
  */
 export async function exportBatch(input: BatchExportInput): Promise<BatchExportResult> {
   if (typeof input.outDir !== 'string' || input.outDir === '' || input.outDir.includes('\0')) {
@@ -46,7 +45,7 @@ export async function exportBatch(input: BatchExportInput): Promise<BatchExportR
     }
   }
 
-  for (const file of input.files.slice(0, MAX_FILES)) {
+  for (const file of input.files) {
     const rel = safeRelative(file.relative)
     if (rel === null) {
       failed.push({ relative: String(file.relative), detail: '路径不合法' })
@@ -79,5 +78,6 @@ export async function exportBatch(input: BatchExportInput): Promise<BatchExportR
     })
   }
 
-  return { outDir, written, failed, assets }
+  const totalCount = typeof input.totalFiles === 'number' ? input.totalFiles : input.files.length
+  return { outDir, written, failed, assets, truncated: totalCount > input.files.length, totalCount }
 }

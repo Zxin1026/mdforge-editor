@@ -17,6 +17,8 @@ export interface LinksView {
   /** 索引里一共有多少个文档、多少条链接 */
   totalDocs: number
   totalLinks: number
+  /** 文档数超过扫描上限，索引只覆盖一部分 */
+  truncated: boolean
   backlinks: Array<{ path: string; name: string; line: number; text: string }>
 }
 
@@ -28,6 +30,8 @@ export interface TagsView {
   docs: TagDoc[]
   /** 索引里一共扫描到多少个文档 */
   totalDocs: number
+  /** 文档数超过扫描上限，索引只覆盖一部分 */
+  truncated: boolean
 }
 
 export interface SidePanel {
@@ -207,7 +211,9 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
 
     const counts = document.createElement('div')
     counts.className = 'links-note'
-    counts.textContent = `索引了 ${view.totalDocs} 个文档、${view.totalLinks} 条链接`
+    counts.textContent = `索引了 ${view.totalDocs} 个文档、${view.totalLinks} 条链接${
+      view.truncated ? '（文档数超过扫描上限，索引不完整）' : ''
+    }`
     body.appendChild(counts)
 
     if (view.docPath === null) {
@@ -282,6 +288,9 @@ export function createSidePanel(mount: HTMLElement, handlers: Handlers): SidePan
       nodes.push(note(view.error, true))
       body.replaceChildren(...nodes)
       return
+    }
+    if (view.truncated) {
+      nodes.push(note('文档数超过扫描上限，标签汇总只覆盖前一部分文档'))
     }
     if (view.docs.length === 0) {
       nodes.push(note('文件夹里还没有带标签的文档：在 front matter 里写 tags: [笔记, 教程]，或在「文档信息」里填写标签'))

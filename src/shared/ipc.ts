@@ -358,6 +358,8 @@ export interface BatchExportInput {
   /** index.html、search-index.json 这类附加文件，原样写出 */
   extras: Array<{ relative: string; content: string }>
   options: ExportOptions
+  /** 主进程参数校验时回填的原始页面数：超过上限被截断时用于如实提示，渲染进程不传 */
+  totalFiles?: number
 }
 
 export interface BatchExportResult {
@@ -366,6 +368,10 @@ export interface BatchExportResult {
   /** 写失败的页面：相对路径 + 原因 */
   failed: Array<{ relative: string; detail: string }>
   assets: AssetReport
+  /** 页面数超过单次上限被截断：还有文档没导出 */
+  truncated: boolean
+  /** 渲染进程提交的页面总数（截断前） */
+  totalCount: number
 }
 
 /** EPUB：每篇文档一章，图片统一内联进章节文件 */
@@ -381,6 +387,8 @@ export interface EpubExportInput {
   chapters: EpubChapterInput[]
   /** 书籍样式表内容 */
   css: string
+  /** 主进程参数校验时回填的原始章节数：超过上限被截断时用于如实提示，渲染进程不传 */
+  totalChapters?: number
 }
 
 export interface EpubExportResult {
@@ -388,11 +396,20 @@ export interface EpubExportResult {
   chapters: number
   /** 内联进书里的图片张数 */
   images: number
+  /** 章节数超过上限被截断：还有文档没进书 */
+  truncated: boolean
 }
 
 /** DOCX 的编号表 id：渲染进程写进 numPr，主进程的 numbering.xml 按同一约定生成 */
 export const DOCX_NUM_BULLET = 1
 export const DOCX_NUM_ORDERED = 2
+
+/** DOCX 导出上限：图片（含公式栅格化结果）与链接，主进程校验、渲染进程提示共用 */
+export const MAX_DOCX_IMAGES = 600
+export const MAX_DOCX_LINKS = 500
+
+/** 文件夹扫描（链接/标签索引）的文档数上限：超出被截断，界面按此如实提示 */
+export const WALK_MAX_FILES = 2000
 
 /** DOCX 导出：渲染进程产出 <w:body> 与关系清单，主进程读图、拼包、写文件 */
 export interface DocxLinkRef {
@@ -404,10 +421,12 @@ export interface DocxLinkRef {
 export interface DocxImageRef {
   /** 占位注释里的图片 id（rIdI 前缀） */
   id: string
-  /** 渲染进程解析好的绝对路径 */
+  /** 渲染进程解析好的绝对路径；带 bytes 的内联图片（公式）这里只是显示名 */
   path: string
   /** 正文 w= 指定的显示宽度（px）；null 用原尺寸（超宽会收窄） */
   widthPx: number | null
+  /** 内联图片字节：公式在渲染进程栅格化成 PNG 后直接随参数带上，主进程不再读盘 */
+  bytes?: Uint8Array
 }
 
 export interface DocxExportInput {
@@ -640,6 +659,8 @@ export interface DocLink {
 export interface LinkIndexResult {
   files: DocRef[]
   links: DocLink[]
+  /** 文档数超过扫描上限被截断：files 不完整 */
+  truncated: boolean
 }
 
 /** 标签索引：文件夹里带 front matter 标签的文档（tags / keywords 都认） */
@@ -654,6 +675,8 @@ export interface TagIndexResult {
   files: DocRef[]
   /** 有标签的文档 */
   docs: DocTags[]
+  /** 文档数超过扫描上限被截断：files 与 docs 都不完整 */
+  truncated: boolean
 }
 
 /** 重启后恢复的会话：打开的标签顺序、当前标签、最近打开列表 */

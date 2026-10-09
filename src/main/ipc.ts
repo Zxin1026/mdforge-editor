@@ -3,6 +3,8 @@ import path from 'node:path'
 import {
   CHANNEL,
   ENCODING_CHOICES,
+  MAX_DOCX_IMAGES,
+  MAX_DOCX_LINKS,
   normalizeExportOptions,
   type AssetRenameInput,
   type AssetReplaceInput,
@@ -273,7 +275,9 @@ function parseAssetReplace(raw: unknown): AssetReplaceInput {
   }
 }
 
-/** 批量导出参数：页面与附加文件逐个过形状检查，数量设上限 */
+/** 批量导出参数：页面与附加文件逐个过形状检查，数量设上限；截断前的总数回填给结果层提示 */
+const MAX_BATCH_FILES = 1000
+
 function parseBatchExport(raw: unknown): BatchExportInput {
   if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '导出参数不合法')
   const input = raw as Partial<BatchExportInput>
@@ -289,7 +293,6 @@ function parseBatchExport(raw: unknown): BatchExportInput {
           html: item.html,
           docPath: typeof item.docPath === 'string' ? item.docPath : null
         }))
-        .slice(0, 1000)
     : []
   const extras = Array.isArray(input.extras)
     ? input.extras
@@ -299,10 +302,10 @@ function parseBatchExport(raw: unknown): BatchExportInput {
         )
         .slice(0, 50)
     : []
-  return { outDir: input.outDir, files, extras, options: normalizeExportOptions(input.options) }
+  return { outDir: input.outDir, files: files.slice(0, MAX_BATCH_FILES), extras, options: normalizeExportOptions(input.options), totalFiles: files.length }
 }
 
-/** EPUB 参数：章节数与单章体量都设上限，避免渲染进程失误塞爆内存 */
+/** EPUB 参数：章节数与单章体量都设上限，避免渲染进程失误塞爆内存；截断前的总数回填给结果层提示 */
 const MAX_EPUB_CHAPTERS = 300
 
 function parseEpubExport(raw: unknown): EpubExportInput {
@@ -322,20 +325,17 @@ function parseEpubExport(raw: unknown): EpubExportInput {
           html: item.html,
           docPath: typeof item.docPath === 'string' ? item.docPath : null
         }))
-        .slice(0, MAX_EPUB_CHAPTERS)
     : []
   return {
     title: input.title,
     author: typeof input.author === 'string' ? input.author : undefined,
-    chapters,
-    css: input.css
+    chapters: chapters.slice(0, MAX_EPUB_CHAPTERS),
+    css: input.css,
+    totalChapters: chapters.length
   }
 }
 
-/** DOCX 参数：正文 XML 与关系清单逐个过形状检查，数量设上限 */
-const MAX_DOCX_IMAGES = 300
-const MAX_DOCX_LINKS = 500
-
+/** DOCX 参数：正文 XML 与关系清单逐个过形状检查，数量上限见 shared/ipc.ts */
 function parseDocxExport(raw: unknown): DocxExportInput {
   if (raw === null || typeof raw !== 'object') throw new FileOpError('invalid-path', '导出参数不合法')
   const input = raw as Partial<DocxExportInput>
@@ -358,7 +358,8 @@ function parseDocxExport(raw: unknown): DocxExportInput {
             typeof item === 'object' &&
             typeof item.id === 'string' &&
             typeof item.path === 'string' &&
-            (typeof item.widthPx === 'number' || item.widthPx === null)
+            (typeof item.widthPx === 'number' || item.widthPx === null) &&
+            (item.bytes === undefined || item.bytes instanceof Uint8Array)
         )
         .slice(0, MAX_DOCX_IMAGES)
     : []

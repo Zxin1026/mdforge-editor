@@ -60,5 +60,6 @@ export async function exportEpub(input: EpubExportInput, parent: BrowserWindow |
     throw mapFsError(error, target)
   }
   grantPath(target)
-  return { path: target, chapters: chapters.length, images }
+  const totalChapters = input.totalChapters ?? input.chapters.length
+  return { path: target, chapters: chapters.length, images, truncated: totalChapters > input.chapters.length }
 }

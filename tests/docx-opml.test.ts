@@ -34,8 +34,8 @@ const SAMPLE = [
 ].join('\n')
 
 describe('DOCX 正文构建', () => {
-  it('标题、强调、代码、表格与列表都产出对应标记', () => {
-    const { bodyXml } = buildDocx(SAMPLE, 'C:\\notes\\a.md')
+  it('标题、强调、代码、表格与列表都产出对应标记', async () => {
+    const { bodyXml } = await buildDocx(SAMPLE, 'C:\\notes\\a.md')
     expect(bodyXml).toContain('<w:pStyle w:val="Heading1"/>')
     expect(bodyXml).toContain('<w:b/>')
     expect(bodyXml).toContain('<w:i/>')
@@ -47,8 +47,8 @@ describe('DOCX 正文构建', () => {
     expect(bodyXml).toContain('<w:pStyle w:val="Quote"/>')
   })
 
-  it('超链接与图片登记进关系清单，图片留占位注释', () => {
-    const { links, images, bodyXml } = buildDocx(SAMPLE, 'C:\\notes\\a.md')
+  it('超链接与图片登记进关系清单，图片留占位注释', async () => {
+    const { links, images, bodyXml } = await buildDocx(SAMPLE, 'C:\\notes\\a.md')
     expect(links).toHaveLength(1)
     expect(links[0].target).toBe('https://example.com')
     expect(bodyXml).toContain(`<w:hyperlink r:id="${links[0].id}">`)
@@ -58,16 +58,29 @@ describe('DOCX 正文构建', () => {
     expect(images[0].path.replace(/\\/g, '/')).toBe('C:/notes/assets/pic.png')
   })
 
-  it('XML 特殊字符被转义', () => {
-    const { bodyXml } = buildDocx('5 < 6 & "引号"', null)
+  it('XML 特殊字符被转义', async () => {
+    const { bodyXml } = await buildDocx('5 < 6 & "引号"', null)
     expect(bodyXml).toContain('5 &lt; 6 &amp; &quot;引号&quot;')
     expect(bodyXml).not.toContain('5 < 6')
   })
 
-  it('未保存文档的图片退化成 alt 文字', () => {
-    const { images, bodyXml } = buildDocx('![示意图](pic.png)', null)
+  it('未保存文档的图片退化成 alt 文字', async () => {
+    const { images, bodyXml } = await buildDocx('![示意图](pic.png)', null)
     expect(images).toHaveLength(0)
     expect(bodyXml).toContain('[图片：示意图]')
+  })
+
+  it('公式在无 DOM 环境（单测）退回源码文本，内容不丢', async () => {
+    const { bodyXml } = await buildDocx('行内 $a^2$ 公式\n\n$$\nx = 1\n$$\n', null)
+    expect(bodyXml).toContain('$a^2$')
+    expect(bodyXml).toContain('$$x = 1$$')
+    expect(bodyXml).toContain('<w:jc w:val="center"/>')
+  })
+
+  it('mermaid 围栏在无 DOM 环境退回代码块', async () => {
+    const { bodyXml, images } = await buildDocx('```mermaid\ngraph TD; A-->B;\n```\n', null)
+    expect(images).toHaveLength(0)
+    expect(bodyXml).toContain('graph TD; A--&gt;B;')
   })
 })
 

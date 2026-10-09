@@ -5,9 +5,11 @@ import {
   DEFAULT_EXPORT_OPTIONS,
   DEFAULT_FONT_SIZE,
   ENCODING_CHOICES,
+  MAX_DOCX_IMAGES,
   PAPER_SIZES,
   SIDEBAR_WIDTH_DEFAULT,
   SPLIT_RATIO_DEFAULT,
+  WALK_MAX_FILES,
   customRefOf,
   normalizeContentWidth,
   normalizeFontSize,
@@ -60,7 +62,7 @@ import {
   templateLabel,
   themeLabel
 } from './export/options'
-import { buildHtml, deriveTitle, renderBody, renderText } from './export/html'
+import { buildHtml, deriveTitle, mathStyleFor, renderBody, renderText } from './export/html'
 import { buildDocx } from './export/docx'
 import { buildOpml } from './export/opml'
 import { buildSitePlan } from './export/site'
@@ -906,6 +908,7 @@ export class Workspace {
       error: null,
       totalDocs: this.linkIndex?.files.length ?? 0,
       totalLinks: this.linkIndex?.links.length ?? 0,
+      truncated: this.linkIndex?.truncated ?? false,
       backlinks: []
     }
     this.side_.renderLinks(base)
@@ -931,6 +934,7 @@ export class Workspace {
       error: null,
       totalDocs: index.files.length,
       totalLinks: index.links.length,
+      truncated: index.truncated,
       backlinks
     })
   }
@@ -973,7 +977,7 @@ export class Workspace {
 
   async refreshTags(force: boolean): Promise<void> {
     const dir = this.folderRoot
-    const base: TagsView = { dir, loading: dir !== null, error: null, docs: [], totalDocs: 0 }
+    const base: TagsView = { dir, loading: dir !== null, error: null, docs: [], totalDocs: 0, truncated: false }
     this.side_.renderTags(base)
     if (dir === null) {
       this.side_.renderTags({ ...base, loading: false })
@@ -989,7 +993,8 @@ export class Workspace {
       loading: false,
       error: null,
       docs: index.docs.map((doc) => ({ path: doc.path, name: doc.name, tags: doc.tags })),
-      totalDocs: index.files.length
+      totalDocs: index.files.length,
+      truncated: index.truncated
     })
   }
 
@@ -1285,7 +1290,7 @@ export class Workspace {
           this.notify(result.error)
         }
       } else if (kind === 'docx') {
-        const built = buildDocx(tab.state.text, tab.state.path)
+        const built = await buildDocx(tab.state.text, tab.state.path)
         const result = await window.mdforge.exportDocx({
           bodyXml: built.bodyXml,
           title: deriveTitle(tab.state.text, baseName),
@@ -1298,7 +1303,11 @@ export class Workspace {
         if (result.ok) {
           const imageNote = result.value.images > 0 ? `（嵌入 ${result.value.images} 张图片）` : ''
           const missNote = result.value.missing.length > 0 ? `（${result.value.missing.length} 张图片读取失败，已留文字占位）` : ''
-          this.setMessage(`已导出：${result.value.path}${imageNote}${missNote}`)
+          const cutNote =
+            built.images.length > MAX_DOCX_IMAGES
+              ? `（图片与公式共 ${built.images.length} 个，超过上限 ${MAX_DOCX_IMAGES}，超出部分未嵌入）`
+              : ''
+          this.setMessage(`已导出：${result.value.path}${imageNote}${missNote}${cutNote}`)
           this.revealTarget = result.value.path
         } else {
           this.notify(result.error)
@@ -1342,7 +1351,7 @@ export class Workspace {
   // ---- 发布：批量导出 / 静态站点 / EPUB ----
 
   /** 发布数据来源：链接索引给文档清单，已打开的标签优先用内存版本（可能比磁盘新） */
-  private async publishDocs(): Promise<Array<{ path: string; text: string }> | null> {
+  private async publishDocs(): Promise<{ docs: Array<{ path: string; text: string }>; truncated: boolean } | null> {
     const dir = this.folderRoot
     if (dir === null) {
       this.setMessage('先在「文件 → 打开文件夹…」选一个文件夹，再导出')
@@ -1367,14 +1376,15 @@ export class Workspace {
       this.setMessage('文件夹里没有可导出的文档')
       return null
     }
-    return docs
+    return { docs, truncated: index.truncated }
   }
 
   /** 文件 → 导出 → 文件夹为 HTML / 静态站点 */
   async publishBatch(site: boolean): Promise<void> {
     this.clearNotify()
-    const docs = await this.publishDocs()
-    if (docs === null) return
+    const collected = await this.publishDocs()
+    if (collected === null) return
+    const docs = collected.docs
     const dir = this.folderRoot!
     const chosen = await window.mdforge.chooseExportFolder()
     if (!chosen.ok) {
@@ -1403,7 +1413,15 @@ export class Workspace {
       const problems = outcome.failed.length + plan.skipped.length
       const note =
         problems > 0 ? `（${problems} 个页面没写出：${shorten(plan.skipped[0] ?? outcome.failed[0].detail ?? '原因不明')}）` : ''
-      this.setMessage(`已导出 ${outcome.written} 个文件到 ${outcome.outDir}${assetNote(outcome.assets, false)}${note}`)
+      const scanNote = collected.truncated
+        ? `（文件夹文档超过 ${WALK_MAX_FILES} 篇扫描上限，只处理了前 ${WALK_MAX_FILES} 篇，其余请拆分文件夹后重试）`
+        : ''
+      const cutNote = outcome.truncated
+        ? `（共 ${outcome.totalCount} 篇文档，超出单次上限的部分未导出，请拆分文件夹后重试）`
+        : ''
+      this.setMessage(
+        `已导出 ${outcome.written} 个文件到 ${outcome.outDir}${assetNote(outcome.assets, false)}${note}${scanNote}${cutNote}`
+      )
       this.revealTarget = outcome.outDir
     } catch (error) {
       this.notify({ code: 'unknown', message: `导出失败：${error instanceof Error ? error.message : String(error)}` })
@@ -1417,6 +1435,7 @@ export class Workspace {
     const active = this.active()
     let docs: Array<{ path: string; text: string }> = []
     let title = ''
+    let scanTruncated = false
 
     if (this.folderRoot !== null) {
       const scope = await askDialog<'folder' | 'doc' | 'cancel'>({
@@ -1434,7 +1453,8 @@ export class Workspace {
       if (scope === 'folder') {
         const collected = await this.publishDocs()
         if (collected === null) return
-        docs = collected
+        docs = collected.docs
+        scanTruncated = collected.truncated
         title = baseNameOf(this.folderRoot)
       }
     }
@@ -1461,11 +1481,14 @@ export class Workspace {
       const firstText = docs[0]?.text ?? ''
       const front = frontMatterTextOf(firstText)
       const author = front === null ? '' : readFields(parseFrontMatter(front)).author
+      const bookCss = cssForRef(this.exportOptions.theme, this.exportOptions.highlight)
+      // 书里有公式就补 katex 排版表（字体内嵌，随书独立生效）
+      const mathCss = await mathStyleFor(chapters.map((chapter) => chapter.html).join('\n'))
       const response = await window.mdforge.exportEpub({
         title,
         author: author === '' ? undefined : author,
         chapters,
-        css: cssForRef(this.exportOptions.theme, this.exportOptions.highlight)
+        css: `${bookCss}${mathCss}`
       })
       if (!response.ok) {
         this.notify(response.error)
@@ -1473,7 +1496,13 @@ export class Workspace {
       }
       const outcome = response.value
       const imageNote = outcome.images > 0 ? `（内联 ${outcome.images} 张图片）` : ''
-      this.setMessage(`已导出 EPUB：${outcome.path}${imageNote}`)
+      const scanNote = scanTruncated
+        ? `（文件夹文档超过 ${WALK_MAX_FILES} 篇扫描上限，只处理了前 ${WALK_MAX_FILES} 篇，其余请拆分文件夹后重试）`
+        : ''
+      const cutNote = outcome.truncated
+        ? `（共 ${docs.length} 章，超出单次上限的部分未进书，请拆分文件夹后重试）`
+        : ''
+      this.setMessage(`已导出 EPUB：${outcome.path}${imageNote}${scanNote}${cutNote}`)
       this.revealTarget = outcome.path
     } catch (error) {
       this.notify({ code: 'unknown', message: `EPUB 导出失败：${error instanceof Error ? error.message : String(error)}` })

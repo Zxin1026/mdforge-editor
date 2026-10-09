@@ -34,6 +34,11 @@ ul, ol { padding-left: 1.6em; }
 li + li { margin-top: .25em; }
 input[type='checkbox'] { margin-right: .4em; vertical-align: -.12em; }
 hr { height: 1px; margin: 1.5em 0; border: 0; }
+/* 公式与图表：行间公式可横向滚动，行内公式按整体换行（katex 排版表在用到时另行追加） */
+.mdf-math-block { overflow-x: auto; }
+.mdf-math-inline { display: inline-block; vertical-align: -.12em; }
+.mdf-mermaid { margin: 0 0 1em; text-align: center; }
+.mdf-mermaid svg { max-width: 100%; height: auto; }
 /* 静态站点的页首导航：与正文同一基调，只用透明度拉开层次 */
 .mdf-site-nav { max-width: 860px; margin: 0 auto; padding: 18px 40px 0; font-size: 14px; }
 .mdf-site-nav a { color: inherit; opacity: .65; text-decoration: none; }
@@ -59,7 +64,7 @@ hr { height: 1px; margin: 1.5em 0; border: 0; }
 .hljs-deletion { color: #b31d28; background: #ffeef0; }
 @media print {
   .mdf-doc { max-width: none; padding: 0; }
-  pre, blockquote, table, img, .mdf-toc { break-inside: avoid; }
+  pre, blockquote, table, img, .mdf-toc, .mdf-math-block, .mdf-mermaid { break-inside: avoid; }
   h1, h2, h3 { break-after: avoid; }
 }
 `

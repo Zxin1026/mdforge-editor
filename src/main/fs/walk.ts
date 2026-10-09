@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { WALK_MAX_FILES } from '../../shared/ipc'
 
 export interface WalkedFile {
   path: string
@@ -12,7 +13,6 @@ const OPENABLE = new Set(['.md', '.markdown', '.mdown', '.mkd', '.txt'])
 /** 搜索与链接索引共用的跳表：这些目录里不会有用户笔记 */
 const SKIP_DIRS = new Set(['node_modules', '.git', '.svn', 'dist', 'out', 'build'])
 
-export const WALK_MAX_FILES = 2000
 const MAX_DEPTH = 12
 
 /**

@@ -1,16 +1,19 @@
 import rehypeHighlight from 'rehype-highlight'
 import rehypeRaw from 'rehype-raw'
-import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
+import rehypeSanitize, { defaultSchema, type Options as SanitizeOptions } from 'rehype-sanitize'
 import rehypeSlug from 'rehype-slug'
 import rehypeStringify from 'rehype-stringify'
 import remarkFrontmatter from 'remark-frontmatter'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
 import remarkParse from 'remark-parse'
 import remarkRehype from 'remark-rehype'
 import { unified } from 'unified'
 import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from '../../../shared/ipc'
 import { pageCss } from './export-css'
 import { rehypeImageWidth, rehypeSiteLinks, rehypeToc, toPlainText, type SiteLinkContext } from './hast'
+import { rehypeKatex } from './math-node'
+import { rehypeMermaid } from './mermaid-node'
 import { applyTemplate, BUILTIN_TEMPLATE_HTML } from './page-template'
 import { cssForRef, templateHtmlForRef } from './style-lib'
 
@@ -23,6 +26,19 @@ export interface DocHtmlExtra {
 }
 
 /**
+ * 收口白名单在 GitHub 默认表上加两处：remark-math 产出的公式节点带
+ * math-inline / math-display 类名，得先活过 sanitize，
+ * 之后才由 rehypeKatex 换成 katex 渲染结果（生成物不再过滤）。
+ */
+const SANITIZE_SCHEMA: SanitizeOptions = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [['className', /^language-./, 'math-inline', 'math-display']]
+  }
+}
+
+/**
  * 导出与校验走 remark 链（CommonMark 合规），与编辑期的 lezer 分工但互不依赖。
  * allowDangerousHtml + rehype-raw 让原始 HTML 进入 hast，再由 rehype-sanitize
  * 统一收口：脚本、事件属性与 javascript: 协议在这里被丢弃。
@@ -32,14 +48,19 @@ function body() {
   return unified()
     .use(remarkParse)
     .use(remarkGfm)
+    .use(remarkMath)
     .use(remarkFrontmatter, ['yaml'])
     .use(remarkRehype, { allowDangerousHtml: true })
     .use(rehypeRaw)
-    .use(rehypeSanitize, defaultSchema)
+    .use(rehypeSanitize, SANITIZE_SCHEMA)
 }
 
 function htmlProcessor(options: ExportOptions, extra: DocHtmlExtra = {}) {
-  const processor = body().use(rehypeSlug).use(rehypeImageWidth)
+  const processor = body()
+    .use(rehypeKatex)
+    .use(rehypeMermaid, { theme: options.theme === 'dark' ? 'dark' : 'light' })
+    .use(rehypeSlug)
+    .use(rehypeImageWidth)
   if (options.toc) processor.use(rehypeToc)
   if (extra.links) processor.use(rehypeSiteLinks, extra.links)
   return processor.use(rehypeHighlight).use(rehypeStringify)
@@ -92,6 +113,16 @@ export async function buildHtml(
   return buildDocHtml(markdownText, title, options, extra)
 }
 
+/**
+ * 正文里出现公式才追加 katex 样式（字体已内嵌为 data URI，不追加则整页保持轻量）。
+ * 字体是几百 KB 的 base64，动态加载，不进编辑器的启动包。
+ */
+export async function mathStyleFor(html: string): Promise<string> {
+  if (!html.includes('class="katex')) return ''
+  const { katexExportCss } = await import('./katex-css')
+  return `\n${katexExportCss()}`
+}
+
 /** 通用页面构建：静态站点在此基础上加站内链接与"返回目录"导航 */
 export async function buildDocHtml(
   markdownText: string,
@@ -105,7 +136,7 @@ export async function buildDocHtml(
       ? ''
       : `<nav class="mdf-site-nav"><a href="${escapeHtml(extra.nav.href)}">${escapeHtml(extra.nav.label)}</a></nav>
 `
-  const css = extra.preview?.themeCss ?? cssForRef(options.theme, options.highlight)
+  const css = (extra.preview?.themeCss ?? cssForRef(options.theme, options.highlight)) + (await mathStyleFor(bodyHtml))
   const template = extra.preview?.templateHtml ?? templateHtmlForRef(options.template) ?? BUILTIN_TEMPLATE_HTML
   return applyTemplate(template, {
     title: escapeHtml(title),

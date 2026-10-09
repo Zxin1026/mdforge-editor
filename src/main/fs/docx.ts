@@ -72,11 +72,14 @@ export async function exportDocx(input: DocxExportInput, parent: BrowserWindow |
 
   for (const [index, image] of input.images.entries()) {
     const placeholder = `<!--mdfimg:${image.id}-->`
-    const display = path.basename(image.path)
+    const display = path.basename(image.path) || `公式${index + 1}`
     if (!bodyXml.includes(placeholder)) continue
-    const absolute = path.resolve(image.path)
+    const inline = image.bytes instanceof Uint8Array && image.bytes.length > 0
+    const absolute = inline ? '' : path.resolve(image.path)
     let data: Buffer | null = null
-    if (isUnderGrantedRoot(absolute)) {
+    if (inline) {
+      data = Buffer.from(image.bytes as Uint8Array)
+    } else if (isUnderGrantedRoot(absolute)) {
       try {
         data = await fs.readFile(absolute)
       } catch {
@@ -88,12 +91,12 @@ export async function exportDocx(input: DocxExportInput, parent: BrowserWindow |
       bodyXml = bodyXml.split(placeholder).join(missingImageRun(display))
       continue
     }
-    const rawExt = path.extname(absolute).slice(1).toLowerCase()
+    const rawExt = inline ? 'png' : path.extname(absolute).slice(1).toLowerCase()
     const ext = MEDIA_EXT.has(rawExt) ? rawExt : 'png'
     const name = `media/image${index + 1}.${ext}`
     media.push({ data, name, id: image.id })
 
-    const natural = imageSizeOf(data, absolute)
+    const natural = imageSizeOf(data, name)
     const widthPx =
       image.widthPx !== null
         ? image.widthPx
